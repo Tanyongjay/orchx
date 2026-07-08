@@ -64,7 +64,14 @@ class Executor:
         self._step_by_id = {s.id: s for s in descriptor.steps}
 
     def _emit(self, node: PlanNode, attempt: StepAttempt) -> None:
-        self.on_event(node, attempt)
+        result = self.on_event(node, attempt)
+        if asyncio.iscoroutine(result):
+            # Schedule the async callback and let it run in the
+            # background. We do not block the engine on persistence
+            # so HTTP/WS clients see progress in real time without
+            # serialising on the engine.
+            asyncio.create_task(result)
+        return
 
     @staticmethod
     def _default_event(node: PlanNode, attempt: StepAttempt) -> None:
