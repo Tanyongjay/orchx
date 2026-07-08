@@ -103,16 +103,63 @@ def test_get_run_404(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_cancel_unknown_run_404(client: TestClient) -> None:
+    r = client.post("/api/runs/does-not-exist/cancel")
+    assert r.status_code == 404
+
+
+def test_cancel_already_terminal_returns_idempotent(client: TestClient) -> None:
+    r = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    run_id = r.json()["id"]
+    final = _wait_terminal(client, run_id, deadline_s=10)
+    assert final is not None
+    assert final["state"] == "ok"
+    # Now it's terminal; cancel must say "already terminal".
+    r2 = client.post(f"/api/runs/{run_id}/cancel")
+    assert r2.status_code == 200
+    body = r2.json()
+    assert body["cancelled"] is False
+    assert body["state"] == "ok"
+    assert body["reason"] == "already terminal"
+
+
+def test_cancel_emits_aborted_event(client: TestClient) -> None:
+    """Even if the run finishes before cancel reaches it, the cancel
+    call must emit an 'aborted' event so the log tells the operator
+    that someone tried to cancel."""
+    r = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    run_id = r.json()["id"]
+    _wait_terminal(client, run_id, deadline_s=10)
+    # Run is already terminal; cancel is a no-op for the engine but
+    # still records the attempt in the event log.
+    client.post(f"/api/runs/{run_id}/cancel")
+    events = client.get(f"/api/runs/{run_id}/events").json()
+    statuses = [e["status"] for e in events]
+    assert "aborted" in statuses, "expected an 'aborted' event from the cancel attempt"
+
+
 # --- helpers ---
 
 
-def _wait_terminal(client: TestClient, run_id: str, *, deadline_s: int):
-    """Poll the run until it leaves 'running' state or the deadline hits."""
+def _wait_terminal(
+    client: TestClient,
+    run_id: str,
+    *,
+    deadline_s: int,
+    terminal_states: tuple[str, ...] = ("ok", "failed"),
+):
+    """Poll the run until it reaches a terminal state or the deadline hits."""
     deadline = time.time() + deadline_s
     final = None
     while time.time() < deadline:
         data = client.get(f"/api/runs/{run_id}").json()
-        if data["state"] in ("ok", "failed"):
+        if data["state"] in terminal_states:
             final = data
             break
         time.sleep(0.05)

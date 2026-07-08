@@ -54,6 +54,7 @@ class Executor:
         resolve_host: ResolveHost | None = None,
         rollback_on_failure: bool = True,
         on_event: Callable[[PlanNode, StepAttempt], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self.descriptor = descriptor
         self.plan = plan
@@ -61,6 +62,7 @@ class Executor:
         self.resolve_host: ResolveHost = resolve_host or default_resolve_host
         self.rollback_on_failure = rollback_on_failure
         self.on_event = on_event or self._default_event
+        self.should_cancel = should_cancel
         self._step_by_id = {s.id: s for s in descriptor.steps}
 
     def _emit(self, node: PlanNode, attempt: StepAttempt) -> None:
@@ -176,6 +178,10 @@ class Executor:
         aborted = False
         try:
             for step_id in self.plan.topo_order:
+                # Cancellation check before each step.
+                if self.should_cancel is not None and self.should_cancel():
+                    aborted = True
+                    break
                 node = self.plan.nodes[step_id]
                 # Reversal steps are free-standing; they only run during rollback.
                 spec = self._step_by_id[step_id]
