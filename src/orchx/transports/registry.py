@@ -1,9 +1,10 @@
 """Transport registry.
 
-A target URI like ``mock://local`` or ``winrm://user:pass@host:port`` is
-parsed here and dispatched to the registered transport. Real transports
-are lazy-imported only if requested, so that the base install does
-not require pywinrm/asyncssh.
+A target URI like ``mock://local``, ``winrm://user:pass@host:port``,
+or ``ssh://user@host:port`` is parsed here and dispatched to the
+registered transport. Real transports are lazy-imported only if
+requested, so the base install does not require ``pywinrm`` or
+``asyncssh``.
 """
 
 from __future__ import annotations
@@ -79,8 +80,9 @@ register_transport("mock", _make_mock)
 
 
 # Real transports — registered lazily so the base install does not
-# require pywinrm. We import the module on first use, so the optional
-# dependency is paid for only when a real-target URI is requested.
+# require pywinrm or asyncssh. Each module is imported on first use,
+# so the optional dependency is paid for only when a real-target URI
+# is requested.
 
 
 def _make_winrm(
@@ -97,3 +99,19 @@ def _make_winrm(
 
 register_transport("winrm", _make_winrm)
 register_transport("winrm-http", _make_winrm)
+
+
+def _make_ssh(
+    target: str,
+    host: str,
+    port: int,
+    parsed,
+    **_kwargs: object,
+) -> Transport:
+    from orchx.transports.ssh import SSHTransport
+
+    return SSHTransport(target)
+
+
+register_transport("ssh", _make_ssh)
+register_transport("ssh+key", _make_ssh)
