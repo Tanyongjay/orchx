@@ -10,9 +10,12 @@ that:
   * the executor runs the full step set against the mock transport,
   * failure paths trigger rollback across the topology.
 
-The two descriptors we exercise:
+The descriptors we exercise:
   * sample_webapp_erp.yaml — Windows / IIS / SQL Server / COM bridge
   * sample_oauth_service.yaml — Linux / systemd / PostgreSQL / tarball
+  * sample_containerized_saas.yaml — Linux / docker compose / 3 roles /
+    3 healthcheck probes (app HTTP, app admin, worker metrics) / rolling
+    upgrade (new worker up before old one is stopped)
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from orchx.transports.mock import MockConfig, MockTransport
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEBAPP = REPO_ROOT / "descriptors" / "sample_webapp_erp.yaml"
 OAUTH = REPO_ROOT / "descriptors" / "sample_oauth_service.yaml"
+SAAS = REPO_ROOT / "descriptors" / "sample_containerized_saas.yaml"
 
 
 def _run(transport: MockTransport, descriptor: Path) -> object:
@@ -49,8 +53,8 @@ def _run(transport: MockTransport, descriptor: Path) -> object:
 
 @pytest.mark.parametrize(
     "descriptor",
-    [WEBAPP, OAUTH],
-    ids=["webapp-erp", "oauth-svc"],
+    [WEBAPP, OAUTH, SAAS],
+    ids=["webapp-erp", "oauth-svc", "containerized-saas"],
 )
 def test_descriptor_runs_cleanly(descriptor):
     transport = MockTransport()

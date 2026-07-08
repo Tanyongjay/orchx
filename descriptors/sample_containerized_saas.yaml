@@ -1,0 +1,226 @@
+# Sample descriptor for a containerized multi-service SaaS.
+# Topologically distinct from the other two sample descriptors:
+#   * No IIS, no COM, no systemd, no SQL Server.
+#   * Three "services" in a single topology (app + worker + db).
+#   * Multiple roles including a dedicated "control" host.
+#   * Healthcheck with a multi-port TCP probe.
+#   * "Rolling" restart (start new worker before stopping old)
+#     instead of "stop, install, start" — closer to a real
+#     zero-downtime upgrade.
+#   * Uses docker compose on the application host.
+#   * The control host runs the versioned service registry
+#     and emits "ready" only after both the app AND worker pass
+#     their healthcheck.
+#
+# The same engine, descriptor schema, transport abstraction, and
+# CLI drive this descriptor; only the YAML differs from
+# sample_webapp_erp.yaml and sample_oauth_service.yaml. That is
+# the abstraction the project promises.
+system:
+  name: Containerized SaaS Platform
+  code: saas_app
+  version: 7.3.1
+
+install_root: /opt/saas_app
+
+variables:
+  registry_host: "registry.internal:5000"
+  app_port_http: "8080"
+  app_port_admin: "8443"
+  worker_port_metrics: "9100"
+  db_name: "saas_app_db"
+  db_user: "saas_app"
+
+topology:
+  roles:
+    - name: control
+      count: 1
+      description: Local orchestrator host (where the CLI runs)
+    - name: app
+      count: 1
+      description: Linux host running the application container
+    - name: db
+      count: 1
+      description: PostgreSQL server backing the multi-tenant store
+
+steps:
+  # 1. Sanity checks on the control host.
+  - id: precheck.control
+    type: check
+    on_host: control
+    check:
+      kind: env
+      target: ORCHX_CONTROL
+
+  - id: precheck.app
+    type: check
+    on_host: app
+    check:
+      kind: env
+      target: APP_HOST
+
+  - id: precheck.db
+    type: check
+    on_host: db
+    check:
+      kind: env
+      target: DB_HOST
+
+  # 2. Prepare the database (idempotent — author used DO $$).
+  - id: db.bootstrap
+    type: sql
+    on_host: db
+    sql: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ db_user }}') THEN
+          CREATE ROLE {{ db_user }} LOGIN PASSWORD 'replace-me-in-vault';
+        END IF;
+      END
+      $$;
+      SELECT 'CREATE DATABASE {{ db_name }} OWNER {{ db_user }}'
+        WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{{ db_name }}')
+      \\gexec
+
+  # 3. Apply the schema (idempotent IF NOT EXISTS).
+  - id: db.schema
+    type: sql
+    on_host: db
+    sql: |
+      CREATE TABLE IF NOT EXISTS tenants (
+        id          UUID PRIMARY KEY,
+        name        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS tenant_secrets (
+        tenant_id  UUID PRIMARY KEY REFERENCES tenants(id),
+        secret     TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS tenant_secrets_tenant_idx
+        ON tenant_secrets (tenant_id);
+    needs: [db.bootstrap]
+
+  # 4. Pull the new app image to the local registry mirror.
+  - id: image.pull.app
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "docker pull {{ registry_host }}/{{ system.code }}:{{ system.version }} || true"
+    needs: [precheck.app]
+
+  # 5. Pull the new worker image.
+  - id: image.pull.worker
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "docker pull {{ registry_host }}/{{ system.code }}_worker:{{ system.version }} || true"
+    needs: [precheck.app]
+
+  # 6. Render the new compose file. (Idempotent — overwrites in place.)
+  - id: compose.write
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "envsubst < /opt/saas_app/templates/docker-compose.yml.tmpl > /opt/saas_app/docker-compose.yml"
+    needs: [image.pull.app, image.pull.worker]
+
+  # 7. Bring up the NEW worker (before stopping the old — rolling).
+  - id: worker.up
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "cd /opt/saas_app && docker compose up -d worker"
+    needs: [compose.write, db.schema]
+
+  # 8. Paired reversal (kill the new worker we just brought up).
+  - id: rev:worker.up
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "cd /opt/saas_app && docker compose stop worker"
+
+  # 9. Wait for the new worker to be ready (metrics port is the
+  #    last thing to come up).
+  - id: worker.ready
+    type: healthcheck
+    on_host: app
+    url: "tcp://127.0.0.1:{{ worker_port_metrics }}"
+    expect_status: 200
+    interval_seconds: 2
+    max_attempts: 30
+    needs: [worker.up]
+
+  # 10. Now bring up the new app. Old app is still running; this is
+  #     the "rolling" part — we only stop the old app after the new
+  #     one is ready.
+  - id: app.up
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "cd /opt/saas_app && docker compose up -d app"
+    needs: [worker.ready]
+
+  # 11. Paired reversal.
+  - id: rev:app.up
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "cd /opt/saas_app && docker compose stop app"
+
+  # 12. Wait for the new app on its HTTP port.
+  - id: app.http.ready
+    type: healthcheck
+    on_host: app
+    url: "tcp://127.0.0.1:{{ app_port_http }}"
+    expect_status: 200
+    interval_seconds: 2
+    max_attempts: 30
+    needs: [app.up]
+
+  # 13. Wait for the new app on its admin port (separate process
+  #     or socket, may take longer than the HTTP port).
+  - id: app.admin.ready
+    type: healthcheck
+    on_host: app
+    url: "tcp://127.0.0.1:{{ app_port_admin }}"
+    expect_status: 200
+    interval_seconds: 2
+    max_attempts: 30
+    needs: [app.up]
+
+  # 14. Once the new app is healthy, stop the OLD containers. (The
+  #     old app and worker are no longer needed; the new ones are
+  #     already serving traffic.)
+  - id: compose.scale-down-old
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "cd /opt/saas_app && docker compose down --remove-orphans || true"
+    needs: [app.http.ready, app.admin.ready, worker.ready]
+
+  # 15. Final smoke: probe both ports together via the control host.
+  - id: smoke.both_ports
+    type: healthcheck
+    on_host: control
+    url: "tcp://app.internal:{{ app_port_http }}"
+    expect_status: 200
+    interval_seconds: 2
+    max_attempts: 15
+    needs: [compose.scale-down-old]

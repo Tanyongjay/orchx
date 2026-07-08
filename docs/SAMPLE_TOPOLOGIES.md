@@ -1,6 +1,6 @@
 # Sample Topologies
 
-OrchX ships two sample descriptors that exercise topologically
+OrchX ships three sample descriptors that exercise topologically
 different stacks. They share **no platform-specific assumptions**
 in the engine — the engine is YAML-agnostic, transport-agnostic, and
 host-agnostic; everything system-specific lives in the descriptor
@@ -8,17 +8,19 @@ and (for real hosts) in the transport implementation.
 
 ## Side-by-side
 
-| Concern | `sample_webapp_erp.yaml` | `sample_oauth_service.yaml` |
-|---|---|---|
-| Host | Windows (IIS, COM, SQL) | Linux (systemd, PostgreSQL) |
-| Web server | `iis-site` | `command: [systemctl, ...]` |
-| Bridge | `com-register` / `com-unregister` | none (no native bridge) |
-| Database | `sql` against SQL Server | `sql` against PostgreSQL |
-| Package | zip (`package` step) | tarball (`package` step) |
-| Healthcheck | `http://.../health` | `tcp://127.0.0.1:7700` |
-| Reversal | `rev:bridge.register.x86`, `rev:iis.site.create` | `rev:svc.stop` |
-| Steps total | 10 | 11 |
-| Forward runnable | 8 (2 are rev:) | 10 (1 is rev:) |
+| Concern | `sample_webapp_erp.yaml` | `sample_oauth_service.yaml` | `sample_containerized_saas.yaml` |
+|---|---|---|---|
+| Host | Windows (IIS, COM, SQL) | Linux (systemd, PostgreSQL) | Linux (docker compose) |
+| Roles | web, db | web, db | control, app, db |
+| Web server | `iis-site` | `command: [systemctl, ...]` | `command: [docker compose up -d ...]` |
+| Bridge | `com-register` / `com-unregister` | none (no native bridge) | none |
+| Database | `sql` against SQL Server | `sql` against PostgreSQL | `sql` against PostgreSQL |
+| Package | zip (`package` step) | tarball (`package` step) | docker pull (`command` step) |
+| Healthcheck | `http://.../health` | `tcp://127.0.0.1:7700` | 3× `tcp://` (app HTTP, app admin, worker metrics) |
+| Reversal | `rev:bridge.register.x86`, `rev:iis.site.create` | `rev:svc.stop` | `rev:worker.up`, `rev:app.up` |
+| Steps total | 10 | 11 | 15 |
+| Forward runnable | 8 (2 are rev:) | 10 (1 is rev:) | 13 (2 are rev:) |
+| Upgrade style | stop → install → start | stop → install → start | **rolling** (new worker up before old one is stopped) |
 
 ## What the engine treats the same
 
