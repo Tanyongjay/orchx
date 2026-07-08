@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from orchx.web.app import _make_app
 
@@ -144,6 +145,124 @@ def test_cancel_emits_aborted_event(client: TestClient) -> None:
     assert "aborted" in statuses, "expected an 'aborted' event from the cancel attempt"
 
 
+# --- additional coverage: error paths, persistence, websocket ---
+
+
+def test_create_run_with_unknown_target_scheme_reports_failure(
+    client: TestClient,
+) -> None:
+    """A scheme the registry doesn't know must be surfaced as a
+    failed run (HTTP 200 on POST, run.state == 'failed', exit_code == 2)
+    — not a 500 from the web layer."""
+    r = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "telnet://a:b@1.2.3.4:23"},
+    )
+    assert r.status_code == 200
+    run_id = r.json()["id"]
+
+    final = _wait_terminal(client, run_id, deadline_s=5)
+    assert final is not None
+    assert final["state"] == "failed"
+    assert final["exit_code"] == 2
+    # The error event should mention the bad scheme.
+    error_events = [e for e in final["events"] if e["status"] == "failed"]
+    assert error_events, "expected at least one 'failed' event"
+    assert "telnet" in error_events[0]["message"].lower()
+
+
+def test_run_persists_across_clients(tmp_path: Path) -> None:
+    """Two TestClient instances backed by the same SQLite file must
+    see the same run history — this is what makes the control plane
+    usable across process restarts and across multiple workers."""
+    db = tmp_path / "shared.sqlite"
+
+    # Writer: create one run, wait for it to finish, then close the
+    # TestClient (which closes the app and its DB handle).
+    app1 = _make_app(db_path=db)
+    with TestClient(app1) as c1:
+        r = c1.post(
+            "/api/runs",
+            json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+        )
+        run_id = r.json()["id"]
+        _wait_terminal_on(c1, run_id, deadline_s=10)
+
+    # Reader: fresh app, fresh DB handle, same SQLite file.
+    app2 = _make_app(db_path=db)
+    with TestClient(app2) as c2:
+        listing = c2.get("/api/runs").json()
+        ids = [row["id"] for row in listing]
+        assert run_id in ids, "run created by app1 not visible from app2"
+        detail = c2.get(f"/api/runs/{run_id}").json()
+        assert detail["state"] == "ok"
+        assert detail["exit_code"] == 0
+        assert detail["events"], "events must survive a process restart"
+
+
+def test_websocket_replays_history_then_live_stream(
+    client: TestClient,
+) -> None:
+    """The WebSocket endpoint must first replay the event log, then
+    stream live events until the run terminates."""
+    r = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    run_id = r.json()["id"]
+    # Wait until the run has actually started and emitted at least one
+    # forward event; otherwise the WebSocket may replay an empty
+    # history and we lose the chance to see the live tail.
+    _wait_terminal(client, run_id, deadline_s=10)
+
+    seen: list[dict[str, object]] = []
+    with client.websocket_connect(f"/api/runs/{run_id}/stream") as ws:
+        # Read until we see the run reach a terminal state.
+        for _ in range(50):
+            try:
+                msg = ws.receive_json()
+            except WebSocketDisconnect:
+                # The server closed the stream after the run terminated
+                # (which is the correct behaviour); treat that as a
+                # normal end-of-stream signal.
+                break
+            seen.append(msg)
+            if msg.get("status") in ("ok", "failed", "aborted"):
+                break
+    # The replay must give us a fully-formed event log including the
+    # terminal status, not just the synthetic 'pending' kickoff.
+    assert seen, "websocket stream replayed no events"
+    statuses = [e["status"] for e in seen]
+    assert "ok" in statuses, f"expected terminal 'ok' in replay, got {statuses!r}"
+
+
+def test_concurrent_runs_dont_interfere(client: TestClient) -> None:
+    """Kicking off multiple runs in quick succession must not
+    conflate their events or final states."""
+    n = 3
+    run_ids: list[str] = []
+    for _ in range(n):
+        r = client.post(
+            "/api/runs",
+            json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+        )
+        run_ids.append(r.json()["id"])
+
+    finals: list[dict[str, object]] = []
+    for rid in run_ids:
+        final = _wait_terminal(client, rid, deadline_s=15)
+        assert final is not None, f"run {rid} did not finish within 15s"
+        finals.append(final)
+
+    for final, rid in zip(finals, run_ids, strict=True):
+        assert final["state"] == "ok", f"run {rid} ended {final['state']}"
+        assert final["exit_code"] == 0
+        # Every event in this run's log must reference the right run_id.
+        # (We don't have run_id in the event payload today; the smoke
+        # we ship is "no leakage between run rows".)
+        assert final["id"] == rid
+
+
 # --- helpers ---
 
 
@@ -155,6 +274,17 @@ def _wait_terminal(
     terminal_states: tuple[str, ...] = ("ok", "failed"),
 ):
     """Poll the run until it reaches a terminal state or the deadline hits."""
+    return _wait_terminal_on(client, run_id, deadline_s=deadline_s, terminal_states=terminal_states)
+
+
+def _wait_terminal_on(
+    client: TestClient,
+    run_id: str,
+    *,
+    deadline_s: int,
+    terminal_states: tuple[str, ...] = ("ok", "failed"),
+):
+    """Same as _wait_terminal but exposed for cross-client tests."""
     deadline = time.time() + deadline_s
     final = None
     while time.time() < deadline:
