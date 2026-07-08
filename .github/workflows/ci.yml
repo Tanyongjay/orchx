@@ -48,12 +48,24 @@ jobs:
       - name: Smoke plan and deploy against mock
         run: |
           . .venv/bin/activate
+          set +e   # the chaos run below is *expected* to exit non-zero
           orchx plan descriptors/sample_webapp_erp.yaml
           orchx deploy descriptors/sample_webapp_erp.yaml \
               --target mock://local --no-rollback
+          # Inject a package-action failure; the deploy MUST roll
+          # back the prior OK steps and exit 1. The exit code is
+          # not a regression — it is the locked-in contract from
+          # commit 51bc00c.
           orchx deploy descriptors/sample_webapp_erp.yaml \
               --target mock://local \
               --chaos '{"local":[{"action":"package","exit_code":1,"fail_times":99}]}'
+          chaos_rc=$?
+          set -e
+          if [ "$chaos_rc" -ne 1 ]; then
+            echo "expected chaos deploy to exit with 1, got $chaos_rc"
+            exit 1
+          fi
+          echo "chaos deploy exited with $chaos_rc as expected"
 
       - name: Upload failed-run summary
         if: failure()
