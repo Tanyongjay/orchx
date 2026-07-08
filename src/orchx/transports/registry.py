@@ -1,7 +1,7 @@
 """Transport registry.
 
-A target URI like ``mock://local`` or ``winrm://web-1`` is parsed
-here and dispatched to the registered transport. Real transports
+A target URI like ``mock://local`` or ``winrm://user:pass@host:port`` is
+parsed here and dispatched to the registered transport. Real transports
 are lazy-imported only if requested, so that the base install does
 not require pywinrm/asyncssh.
 """
@@ -18,14 +18,21 @@ class TransportNotFoundError(LookupError):
     """Raised when a URI scheme is not registered."""
 
 
-_REGISTRY: dict[str, Callable[..., Transport]] = {}
+class TransportURIError(ValueError):
+    """Raised when a target URI is malformed for its scheme."""
 
 
-def register_transport(scheme: str, factory: Callable[..., Transport]) -> None:
-    """Register a transport factory for ``scheme://...`` URIs.
+# A factory is a callable that takes the *original* URI and the parsed
+# pieces. The original URI is preserved so transports that embed
+# credentials (like winrm://user:pass@host) do not have to round-trip
+# their own state.
+TransportFactory = Callable[..., Transport]
 
-    ``factory`` receives ``**parsed_kwargs`` (host, port, user, ...).
-    """
+_REGISTRY: dict[str, TransportFactory] = {}
+
+
+def register_transport(scheme: str, factory: TransportFactory) -> None:
+    """Register a transport factory for ``scheme://...`` URIs."""
     _REGISTRY[scheme] = factory
 
 
@@ -39,7 +46,13 @@ def get_transport(target: str, **kwargs: object) -> Transport:
         )
     host = parsed.hostname or ""
     port = parsed.port or 0
-    return factory(host=host, port=port, **kwargs)
+    return factory(
+        target=target,
+        host=host,
+        port=port,
+        parsed=parsed,
+        **kwargs,
+    )
 
 
 # ---- Default registrations ----
@@ -47,7 +60,13 @@ def get_transport(target: str, **kwargs: object) -> Transport:
 from orchx.transports.mock import MockTransport  # noqa: E402
 
 
-def _make_mock(host: str, port: int, **_kwargs: object) -> Transport:
+def _make_mock(
+    target: str,
+    host: str,
+    port: int,
+    parsed,
+    **_kwargs: object,
+) -> Transport:
     import os
 
     from orchx.transports.mock import MockConfig
@@ -57,3 +76,24 @@ def _make_mock(host: str, port: int, **_kwargs: object) -> Transport:
 
 
 register_transport("mock", _make_mock)
+
+
+# Real transports — registered lazily so the base install does not
+# require pywinrm. We import the module on first use, so the optional
+# dependency is paid for only when a real-target URI is requested.
+
+
+def _make_winrm(
+    target: str,
+    host: str,
+    port: int,
+    parsed,
+    **_kwargs: object,
+) -> Transport:
+    from orchx.transports.winrm import WinRMTransport
+
+    return WinRMTransport(target)
+
+
+register_transport("winrm", _make_winrm)
+register_transport("winrm-http", _make_winrm)
