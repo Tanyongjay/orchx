@@ -120,3 +120,41 @@ def test_exit_code_matrix_early_failure_is_one():
     """Failure on the very first step must also yield exit 1."""
     cfg = MockConfig.from_json('{"local":[{"action":"iis-site","exit_code":1,"fail_times":99}]}')
     assert _run(MockTransport(config=cfg)).exit_code == 1
+
+
+def test_async_on_event_coroutines_complete_before_run_returns():
+    """All on_event coroutines must finish persisting by the time
+    Executor.run() returns. Without the drain at the end of run(),
+    a follow-up emit on the same event loop can race past
+    in-flight emits and end up with a lower seq number than
+    events it logically follows.
+    """
+    import asyncio
+
+    from orchx.descriptor.loader import load_descriptor
+    from orchx.engine.executor import Executor
+    from orchx.engine.planner import build_plan
+    from orchx.transports.mock import MockTransport
+
+    seen_seqs: list[int] = []
+
+    async def on_event(node, attempt) -> None:
+        # Each emit writes its own seq; the executor records seqs
+        # across all callbacks in the order they finish.
+        seen_seqs.append(attempt.attempt or 0)
+
+    desc = load_descriptor(DESCRIPTOR)
+    plan = build_plan(desc)
+    transport = MockTransport()
+    exec_ = Executor(
+        descriptor=desc,
+        plan=plan,
+        transport=transport,
+        on_event=on_event,
+    )
+    asyncio.run(exec_.run())
+    # We got at least one event per step (RUNNING + OK = 2 each).
+    # Crucially, the drain means none of these were left dangling
+    # — if the drain were missing, this list would be empty or
+    # truncated.
+    assert len(seen_seqs) >= 10

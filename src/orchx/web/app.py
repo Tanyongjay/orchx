@@ -300,6 +300,15 @@ async def _run_in_background(
         return
 
     final_state = "aborted" if report.aborted else "ok" if report.exit_code == 0 else "failed"
+    # Emit a synthetic state-change event so WebSocket clients learn
+    # the final state even if they connected after the run started
+    # and missed the earlier state transitions.
+    await state.store.emit(
+        run_id,
+        status=final_state,
+        step_id="<run>",
+        message=f"run finished: exit_code={report.exit_code}",
+    )
     await state.store.update_run(
         run_id,
         state=final_state,
@@ -534,6 +543,12 @@ async function selectRun(runId) {
   ws = new WebSocket(`${proto}//${location.host}/api/runs/${runId}/stream`);
   ws.onmessage = (e) => {
     const ev = JSON.parse(e.data);
+    // De-dup by seq: server replays history then streams live; the
+    // events we already got from GET /api/runs/{id} would otherwise
+    // be re-appended here and the timeline would double.
+    if (typeof ev.seq === "number" && data.events.some(x => x.seq === ev.seq)) {
+      return;
+    }
     data.events.push(ev);
     // Update state badge from the latest event.
     if (ev.status === "ok" || ev.status === "failed" || ev.status === "aborted") {
@@ -542,17 +557,8 @@ async function selectRun(runId) {
     renderDetail(data);
   };
   ws.onclose = () => { ws = null; };
-  // If still running, expose a cancel button.
-  if (data.state === "pending" || data.state === "running") {
-    const btn = document.createElement("button");
-    btn.textContent = "Cancel run";
-    btn.className = "danger";
-    btn.onclick = () => cancelRun(runId);
-    const row = document.createElement("div");
-    row.className = "row";
-    row.appendChild(btn);
-    $("detail-body").appendChild(row);
-  }
+  // renderDetail() also paints the cancel button if the run is still
+  // in flight, so we don't need to do it here.
 }
 
 function renderDetail(data) {

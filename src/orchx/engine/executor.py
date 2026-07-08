@@ -64,6 +64,12 @@ class Executor:
         self.on_event = on_event or self._default_event
         self.should_cancel = should_cancel
         self._step_by_id = {s.id: s for s in descriptor.steps}
+        # Track on_event coroutines so the run() coroutine can
+        # await them at the end. Without this, a follow-up
+        # await on the same event loop (e.g. emit("run finished"))
+        # can race past pending emits and end up with a lower
+        # seq than the events it logically follows.
+        self._pending_event_tasks: set[asyncio.Task[None]] = set()
 
     def _emit(self, node: PlanNode, attempt: StepAttempt) -> None:
         result = self.on_event(node, attempt)
@@ -72,7 +78,9 @@ class Executor:
             # background. We do not block the engine on persistence
             # so HTTP/WS clients see progress in real time without
             # serialising on the engine.
-            asyncio.create_task(result)
+            task = asyncio.create_task(result)
+            self._pending_event_tasks.add(task)
+            task.add_done_callback(self._pending_event_tasks.discard)
         return
 
     @staticmethod
@@ -211,6 +219,14 @@ class Executor:
         finally:
             report.finished_at = time.time()
             report.aborted = aborted
+            # Drain any pending on_event coroutines so the run ends
+            # with all events fully persisted (and their seq numbers
+            # are lower than anything the caller does next).
+            if self._pending_event_tasks:
+                await asyncio.gather(
+                    *self._pending_event_tasks,
+                    return_exceptions=True,
+                )
             with suppress(Exception):
                 await self.transport.close()
         return report

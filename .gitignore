@@ -24,3 +24,5 @@ vendor_references/
 # State (engine stores run history here by default; do not commit)
 state/local.sqlite
 state/logs/
+*.sqlite
+state/*.sqlite

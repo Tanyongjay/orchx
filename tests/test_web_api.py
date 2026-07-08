@@ -252,6 +252,11 @@ def test_websocket_replays_history_then_live_stream(
     assert seen, "websocket stream replayed no events"
     statuses = [e["status"] for e in seen]
     assert "ok" in statuses, f"expected terminal 'ok' in replay, got {statuses!r}"
+    # The dashboard de-dups by seq; the server must therefore emit
+    # each event exactly once even when the WS replays the full
+    # history. We assert seqs are unique.
+    seqs = [e["seq"] for e in seen if "seq" in e]
+    assert len(seqs) == len(set(seqs)), f"server emitted duplicate seqs over WS: {seqs!r}"
 
 
 def test_concurrent_runs_dont_interfere(client: TestClient) -> None:
