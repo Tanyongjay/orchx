@@ -1,0 +1,139 @@
+# Sample descriptor for a Linux + systemd + PostgreSQL + tarball
+# topology. Deliberately different from sample_webapp_erp.yaml:
+#   * no IIS, no COM bridge, no SQL Server
+#   * tarball instead of zip, sha256 sum
+#   * systemd unit instead of windows service
+#   * tcp:// healthcheck instead of http://
+#   * runs as a normal user with a Unix socket
+#
+# The same engine, descriptor schema, transport abstraction, and CLI
+# drive this descriptor; only the YAML differs from the webapp-ERP
+# sample. That is the abstraction the project promises.
+system:
+  name: Internal OAuth Token Service
+  code: oauth_svc
+  version: 4.2.0
+
+install_root: /opt/oauth_svc
+
+variables:
+  app_port: "7700"
+  db_name: "oauth_svc_db"
+  db_user: "oauth_svc"
+
+topology:
+  roles:
+    - name: web
+      count: 1
+      description: Linux host running the OAuth daemon under systemd
+    - name: db
+      count: 1
+      description: PostgreSQL server backing the token store
+
+steps:
+  # 1. Sanity check on the application host.
+  - id: precheck.systemd
+    type: check
+    on_host: web
+    check:
+      kind: env
+      target: SYSTEMD
+
+  # 2. Make sure PostgreSQL is reachable.
+  - id: precheck.db
+    type: check
+    on_host: db
+    check:
+      kind: env
+      target: DB_HOST
+
+  # 3. Create the application role + database (idempotent).
+  - id: db.bootstrap
+    type: sql
+    on_host: db
+    sql: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ db_user }}') THEN
+          CREATE ROLE {{ db_user }} LOGIN PASSWORD 'replace-me-in-vault';
+        END IF;
+      END
+      $$;
+      SELECT 'CREATE DATABASE {{ db_name }} OWNER {{ db_user }}'
+        WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{{ db_name }}')
+      \\gexec
+
+  # 4. Apply the schema migration (authored to be idempotent).
+  - id: db.schema
+    type: sql
+    on_host: db
+    sql: |
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id   TEXT PRIMARY KEY,
+        client_hash TEXT NOT NULL,
+        scopes      TEXT[] NOT NULL DEFAULT '{}',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        jti          UUID PRIMARY KEY,
+        client_id    TEXT NOT NULL REFERENCES oauth_clients(client_id),
+        expires_at   TIMESTAMPTZ NOT NULL,
+        revoked_at   TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS oauth_tokens_expires_at_idx
+        ON oauth_tokens (expires_at);
+    needs: [db.bootstrap]
+
+  # 5. Stage the tarball (idempotent — orchestrator hashes content).
+  - id: pkg.stage
+    type: package
+    on_host: web
+    src: "{{ install_root }}/dist/oauth_svc-{{ system.version }}.tar.gz"
+
+  # 6. Stop the running service before we replace the binary.
+  #    Reversal re-starts it; the failure path needs the daemon up
+  #    only if it was up before.
+  - id: svc.stop
+    type: command
+    on_host: web
+    cmd: [systemctl, stop, oauth_svc.service]
+
+  # 7. Paired reversal.
+  - id: rev:svc.stop
+    type: command
+    on_host: web
+    cmd: [systemctl, start, oauth_svc.service]
+
+  # 8. Run the install script inside the staged tarball.
+  - id: pkg.install
+    type: command
+    on_host: web
+    cmd:
+      - /bin/sh
+      - -c
+      - "{{ install_root }}/bin/install.sh '{{ install_root }}' '{{ db_user }}'"
+    needs: [pkg.stage, svc.stop, db.schema]
+
+  # 9. Start the service (it was stopped for the install).
+  - id: svc.start
+    type: command
+    on_host: web
+    cmd: [systemctl, start, oauth_svc.service]
+    needs: [pkg.install]
+
+  # 10. Reload systemd to pick up any unit changes.
+  - id: svc.reload
+    type: command
+    on_host: web
+    cmd: [systemctl, daemon-reload]
+    needs: [svc.start]
+
+  # 11. Wait for the daemon's TCP port to come up.
+  - id: smoke.tcp
+    type: healthcheck
+    on_host: web
+    url: "tcp://127.0.0.1:{{ app_port }}"
+    expect_status: 200
+    interval_seconds: 2
+    max_attempts: 15
+    needs: [svc.start]

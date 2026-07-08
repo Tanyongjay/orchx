@@ -507,7 +507,10 @@ async def execute_step(
             return (ok, f"status={res.status}")
 
         if action.kind == "healthcheck":
-            # healthcheck = poll http until expect_status or attempts
+            # healthcheck = poll http/tcp until expect_status or attempts.
+            # URL scheme decides the probe kind:
+            #   http(s)://...  -> HTTP probe via transport.send_http
+            #   tcp://host:port -> TCP open probe; status is 200 on success
             import asyncio
 
             url = action.payload["url"]
@@ -516,11 +519,18 @@ async def execute_step(
             max_attempts = action.payload["max_attempts"]
             last = 0
             for _ in range(max_attempts):
-                resp = await transport.send_http(
-                    action.host,
-                    HttpSendRequest(method="GET", url=url),
-                )
-                last = resp.status
+                if url.startswith("tcp://"):
+                    resp = await transport.tcp_open(  # type: ignore[attr-defined]
+                        action.host,
+                        url,
+                    )
+                    last = resp
+                else:
+                    resp = await transport.send_http(
+                        action.host,
+                        HttpSendRequest(method="GET", url=url),
+                    )
+                    last = resp.status
                 if last == expect:
                     return (True, f"status={last}")
                 await asyncio.sleep(interval)

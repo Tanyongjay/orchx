@@ -111,6 +111,13 @@ class Transport(Protocol):
 
     async def send_http(self, host: str, req: HttpSendRequest) -> HttpSendResult: ...
 
+    async def tcp_open(self, host: str, target: str) -> int:
+        """Open a TCP connection to ``target`` (a ``tcp://host:port`` URL).
+
+        Returns ``200`` on success (open), ``0`` on failure. The healthcheck
+        step interprets this in the same way it interprets HTTP status.
+        """
+
     async def file_exists(self, host: str, path: str) -> bool: ...
 
     async def close(self) -> None: ...

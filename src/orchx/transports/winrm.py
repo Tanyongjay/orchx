@@ -365,6 +365,28 @@ class WinRMTransport(Transport):
         )
         return res.exit_code == 0
 
+    async def tcp_open(self, host: str, target: str) -> int:
+        # target is a tcp://host:port URL. We hand it to PowerShell
+        # which has System.Net.Sockets.TcpClient.
+        # host:port is the only thing we can probe remotely; in MVP-1
+        # we ignore the orchestrator-side `host` argument (we are already
+        # running on the host the user asked us to talk to).
+        spec = target[len("tcp://") :]
+        script = (
+            "try {"
+            "  $client = New-Object System.Net.Sockets.TcpClient;"
+            f"  $iar = $client.BeginConnect('{spec.split(':')[0]}', "
+            f"    [int]'{spec.split(':')[1]}', $null, $null);"
+            "  $ok = $iar.AsyncWaitHandle.WaitOne(5000, $false);"
+            "  if (-not $ok) { exit 1 }"
+            "  $client.EndConnect($iar);"
+            "  $client.Close();"
+            "  exit 0"
+            "} catch { exit 1 }"
+        )
+        res = await self._run_ps(script, timeout_s=10)
+        return 200 if res.exit_code == 0 else 0
+
     async def close(self) -> None:
         # winrm.Session has no .close(); drop our refs and let GC collect.
         self._sessions.clear()

@@ -202,6 +202,15 @@ class MockTransport(Transport):
             return HttpSendResult(status=502, body="mock-failure")
         return HttpSendResult(status=200, body='{"ok": true}')
 
+    async def tcp_open(self, host: str, target: str) -> int:
+        # Mock: treat the configured `tcp_open` chaos rule the same way
+        # as the other actions so we can exercise failure paths.
+        self.journal.record(host, "tcp-open", target=target)
+        ec = self._maybe_fail(host, "tcp-open")
+        if ec != 0:
+            return 0
+        return 200
+
     async def file_exists(self, host: str, path: str) -> bool:
         return path in self._filesystem.get(host, {})
 
