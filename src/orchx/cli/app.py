@@ -82,6 +82,19 @@ def deploy(
     descriptor: Path = typer.Argument(..., exists=True, readable=True),
     target: str = typer.Option("mock://local", "--target", "-t"),
     set_: list[str] = typer.Option([], "--set", "-s"),
+    secrets_backend: str | None = typer.Option(
+        None,
+        "--secrets-backend",
+        help=(
+            'Backend used to resolve {% secret "name" %} tokens in the '
+            "descriptor and the target URI. env|file|memory (default: env)."
+        ),
+    ),
+    secrets_file: Path | None = typer.Option(
+        None,
+        "--secrets-file",
+        help="Path to a secrets file (when --secrets-backend=file).",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Render only, no I/O."),
     rollback: bool = typer.Option(
         True,
@@ -98,7 +111,18 @@ def deploy(
     ),
 ) -> None:
     """Deploy against the chosen transport."""
-    parsed = load_descriptor(descriptor)
+    from orchx.secrets import get_vault, substitute_secrets
+
+    vault_kwargs: dict[str, object] = {}
+    if secrets_file is not None:
+        vault_kwargs["path"] = secrets_file
+    vault = get_vault(secrets_backend, **vault_kwargs)
+
+    # Resolve secrets inside the target URI first, so the resolved
+    # form never ends up in process listings / argv.
+    target = substitute_secrets(target, vault)
+
+    parsed = load_descriptor(descriptor, vault=vault)
     overrides = _parse_overrides(set_)
     if overrides:
         parsed = render_descriptor(parsed, _apply_overrides_to_ctx(overrides))

@@ -61,11 +61,26 @@ def _ctx_from_descriptor(desc: Descriptor) -> dict[str, Any]:
     return out
 
 
-def load_descriptor(path: Path | str, base_ctx: dict[str, Any] | None = None) -> Descriptor:
-    """Load YAML, apply template substitution, validate as Descriptor."""
+def load_descriptor(
+    path: Path | str,
+    base_ctx: dict[str, Any] | None = None,
+    *,
+    vault: Any | None = None,
+) -> Descriptor:
+    """Load YAML, apply secret + template substitution, validate as Descriptor.
+
+    If ``vault`` is provided, ``{% secret "name" %}`` tokens are
+    replaced before any other parsing so credentials never land in
+    logs or process state in plaintext form.
+    """
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: descriptor must be a YAML mapping at the root")
+
+    if vault is not None:
+        from orchx.secrets import substitute_secrets
+
+        raw = substitute_secrets(raw, vault)
 
     # Two-pass: first build a partial model so we can use its system.* /
     # defaults.* in the second pass for templating.
