@@ -71,6 +71,8 @@ ignore = []
 # models.py constructs a discriminated-style union value at runtime, which
 # cannot be written as `A | B` (that's annotation-only sugar).
 "src/orchx/descriptor/models.py" = ["UP007"]
+# app.py embeds HTML/CSS/JS; ruff's E501 fights CSS line-length rules.
+"src/orchx/web/app.py" = ["E501"]
 
 
 [tool.ruff.lint.flake8-bugbear]  # type: ignore[list-item]

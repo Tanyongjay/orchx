@@ -311,24 +311,302 @@ async def _run_in_background(
 
 _INDEX_HTML = """
 <!doctype html>
-<html><head><meta charset="utf-8"><title>OrchX</title>
+<html><head>
+<meta charset="utf-8">
+<title>OrchX control plane</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body {
-  font: 14px/1.5 -apple-system, sans-serif;
-  max-width: 920px; margin: 2em auto; padding: 0 1em; color: #222;
-}
-h1 { margin: 0 0 .2em; }
-pre { background: #f5f5f7; padding: .8em; border-radius: 4px; overflow-x: auto; }
-a { color: #0366d6; }
-code { background: #f5f5f7; padding: 1px 4px; border-radius: 3px; }
-</style></head>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0; padding: 0;
+    background: #0d1117; color: #e6edf3;
+  }
+  header {
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 12px 24px; display: flex; align-items: baseline; gap: 12px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .tagline { color: #8b949e; font-size: 12px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; color: #8b949e; letter-spacing: 0.05em; }
+  label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+  input, select {
+    width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+    padding: 6px 8px; border-radius: 4px; font: inherit;
+  }
+  button {
+    background: #238636; color: white; border: none; padding: 7px 14px;
+    border-radius: 4px; cursor: pointer; font: inherit; font-weight: 500;
+  }
+  button:disabled { background: #30363d; cursor: not-allowed; opacity: 0.6; }
+  button.danger { background: #da3633; }
+  button.secondary { background: #21262d; border: 1px solid #30363d; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  .runs-list { list-style: none; padding: 0; margin: 0; max-height: 70vh; overflow-y: auto; }
+  .runs-list li {
+    padding: 10px; border: 1px solid #30363d; border-radius: 4px;
+    margin-bottom: 6px; cursor: pointer;
+  }
+  .runs-list li:hover { background: #1f242c; }
+  .runs-list li.selected { border-color: #58a6ff; background: #1f242c; }
+  .runs-list .row { display: flex; justify-content: space-between; align-items: center; margin: 0; }
+  .runs-list .id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: #8b949e; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .badge.ok { background: rgba(46, 160, 67, 0.15); color: #3fb950; }
+  .badge.failed { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+  .badge.running { background: rgba(88, 166, 255, 0.15); color: #58a6ff; }
+  .badge.pending { background: rgba(187, 128, 9, 0.15); color: #d29922; }
+  .badge.aborted { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
+  .events { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+  .event { padding: 4px 8px; border-bottom: 1px solid #21262d; display: flex; gap: 8px; align-items: center; }
+  .event .status { width: 70px; flex-shrink: 0; }
+  .event .step { color: #d2a8ff; flex-shrink: 0; }
+  .event .host { color: #8b949e; font-size: 11px; }
+  .event .msg { color: #e6edf3; }
+  .event.status-ok .status { color: #3fb950; }
+  .event.status-failed .status { color: #f85149; }
+  .event.status-rolled_back .status { color: #d29922; }
+  .event.status-running .status { color: #58a6ff; }
+  .event.status-pending .status { color: #d29922; }
+  .empty { color: #8b949e; font-style: italic; padding: 20px; text-align: center; }
+  code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; background: #0d1117; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
 <body>
-<h1>OrchX control plane</h1>
-<p>API: <code>GET /api/runs</code>, <code>POST /api/runs</code>,
-<code>GET /api/runs/{id}</code>,
-<code>WS /api/runs/{id}/stream</code>.</p>
-<p>Health: <a href="/healthz">/healthz</a> &middot;
-Runs: <a href="/api/runs">/api/runs</a></p>
+<header>
+  <h1>OrchX control plane</h1>
+  <span class="tagline">Multi-system deploy orchestrator</span>
+  <span class="tagline" style="margin-left:auto"><a href="/api/runs" style="color:#58a6ff">JSON API</a> · <a href="/healthz" style="color:#58a6ff">healthz</a></span>
+</header>
+<main>
+  <section class="panel" id="new-run">
+    <h2>New run</h2>
+    <label for="descriptor">Descriptor</label>
+    <select id="descriptor"></select>
+    <label for="target" style="margin-top:10px">Target URI</label>
+    <input id="target" type="text" value="mock://local" placeholder="mock://local, ssh://user@host, winrm://user:pwd@host">
+    <div class="row">
+      <button id="submit" onclick="submitRun()">Deploy</button>
+      <button class="secondary" onclick="refreshRuns()">Refresh</button>
+    </div>
+  </section>
+
+  <section class="panel" id="runs-panel">
+    <h2>Runs</h2>
+    <ul class="runs-list" id="runs"></ul>
+  </section>
+
+  <section class="panel" id="detail" style="grid-column: 1 / -1;">
+    <h2 id="detail-title">Select a run</h2>
+    <div id="detail-body" class="empty">No run selected.</div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let selectedRunId = null;
+let ws = null;
+
+async function init() {
+  await loadDescriptorOptions();
+  await refreshRuns();
+  setInterval(refreshRuns, 2000);
+}
+
+async function loadDescriptorOptions() {
+  // The orchx CLI bundles a couple of sample descriptors; we list the
+  // local descriptors/ directory so the user can pick without
+  // typing paths. (Server could expose /api/descriptors; the MVP
+  // hardcodes the local list.)
+  const samples = [
+    "descriptors/sample_webapp_erp.yaml",
+    "descriptors/sample_oauth_service.yaml",
+  ];
+  const sel = $("descriptor");
+  sel.innerHTML = "";
+  for (const path of samples) {
+    const opt = document.createElement("option");
+    opt.value = path;
+    opt.textContent = path;
+    sel.appendChild(opt);
+  }
+  // Custom path input: just include a "custom" option
+  const custom = document.createElement("option");
+  custom.value = "__custom__";
+  custom.textContent = "(custom path...)";
+  sel.appendChild(custom);
+  sel.addEventListener("change", () => {
+    if (sel.value === "__custom__") {
+      const p = prompt("Path to descriptor (absolute or relative to project root):");
+      if (p) {
+        const o = document.createElement("option");
+        o.value = p; o.textContent = p; o.selected = true;
+        sel.insertBefore(o, custom);
+      }
+    }
+  });
+}
+
+async function refreshRuns() {
+  let runs = [];
+  try {
+    const r = await fetch("/api/runs");
+    runs = await r.json();
+  } catch (e) {
+    $("runs").innerHTML = '<li class="empty">API unreachable.</li>';
+    return;
+  }
+  const ul = $("runs");
+  const prev = selectedRunId;
+  ul.innerHTML = "";
+  if (!runs.length) {
+    ul.innerHTML = '<li class="empty">No runs yet — kick one off above.</li>';
+    return;
+  }
+  for (const r of runs) {
+    const li = document.createElement("li");
+    li.dataset.id = r.id;
+    if (r.id === prev) li.classList.add("selected");
+    li.onclick = () => selectRun(r.id);
+    const target = r.target || "";
+    const truncated = r.id.length > 12 ? r.id.slice(0, 8) + "…" : r.id;
+    li.innerHTML = `
+      <div class="row">
+        <div>
+          <div><code>${truncated}</code> <span class="badge ${r.state}">${r.state}</span></div>
+          <div class="id">${escapeHtml(target)}</div>
+        </div>
+        <button class="secondary" onclick="event.stopPropagation(); selectRun('${r.id}')">view</button>
+      </div>
+    `;
+    ul.appendChild(li);
+  }
+}
+
+async function submitRun() {
+  const descriptor = $("descriptor").value;
+  const target = $("target").value.trim();
+  if (!descriptor || descriptor === "__custom__") return alert("Pick a descriptor.");
+  if (!target) return alert("Target URI required.");
+  const btn = $("submit");
+  btn.disabled = true; btn.textContent = "Submitting…";
+  try {
+    const r = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ descriptor, target }),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || "submit failed");
+    await refreshRuns();
+    selectRun(body.id);
+  } catch (e) {
+    alert("Failed: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "Deploy";
+  }
+}
+
+async function selectRun(runId) {
+  selectedRunId = runId;
+  // Highlight the list item.
+  for (const li of document.querySelectorAll(".runs-list li")) {
+    li.classList.toggle("selected", li.dataset.id === runId);
+  }
+  $("detail-title").textContent = "Run " + runId;
+  $("detail-body").innerHTML = '<div class="empty">Loading…</div>';
+  // Fetch the run detail (state + events).
+  let data;
+  try {
+    const r = await fetch("/api/runs/" + runId);
+    data = await r.json();
+  } catch (e) {
+    $("detail-body").innerHTML = '<div class="empty">Failed to load.</div>';
+    return;
+  }
+  renderDetail(data);
+  // Open a WebSocket for live updates.
+  if (ws) { try { ws.close(); } catch(e){} }
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/api/runs/${runId}/stream`);
+  ws.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    data.events.push(ev);
+    // Update state badge from the latest event.
+    if (ev.status === "ok" || ev.status === "failed" || ev.status === "aborted") {
+      data.state = ev.status;
+    }
+    renderDetail(data);
+  };
+  ws.onclose = () => { ws = null; };
+  // If still running, expose a cancel button.
+  if (data.state === "pending" || data.state === "running") {
+    const btn = document.createElement("button");
+    btn.textContent = "Cancel run";
+    btn.className = "danger";
+    btn.onclick = () => cancelRun(runId);
+    const row = document.createElement("div");
+    row.className = "row";
+    row.appendChild(btn);
+    $("detail-body").appendChild(row);
+  }
+}
+
+function renderDetail(data) {
+  const body = $("detail-body");
+  // Re-render the body each time — small N, fine.
+  const header = `
+    <div style="margin-bottom:12px">
+      <span class="badge ${data.state}">${data.state}</span>
+      <code>${escapeHtml(data.target || "")}</code>
+      <span style="color:#8b949e;font-size:12px;margin-left:8px">
+        exit=${data.exit_code === null ? "-" : data.exit_code}
+      </span>
+    </div>
+  `;
+  const events = (data.events || []).map(ev => `
+    <div class="event status-${ev.status}">
+      <span class="status">${ev.status}</span>
+      <span class="step">${ev.step_id || "-"}</span>
+      <span class="host">${ev.host || ""}</span>
+      <span class="msg">${escapeHtml(ev.message || "")}</span>
+    </div>
+  `).join("");
+  body.innerHTML = header + '<div class="events">' + events + "</div>";
+  // Re-append cancel button if still in flight.
+  if (data.state === "pending" || data.state === "running") {
+    const row = document.createElement("div");
+    row.className = "row";
+    const btn = document.createElement("button");
+    btn.textContent = "Cancel run";
+    btn.className = "danger";
+    btn.onclick = () => cancelRun(selectedRunId);
+    row.appendChild(btn);
+    body.appendChild(row);
+  }
+}
+
+async function cancelRun(runId) {
+  if (!confirm("Cancel this run?")) return;
+  try {
+    await fetch("/api/runs/" + runId + "/cancel", { method: "POST" });
+    setTimeout(() => selectRun(runId), 200);
+  } catch (e) {
+    alert("Cancel failed: " + e.message);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[ch]));
+}
+
+init();
+</script>
 </body></html>
 """
 

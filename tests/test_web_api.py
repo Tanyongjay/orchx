@@ -45,6 +45,24 @@ def test_index_serves_html(client: TestClient) -> None:
     assert "OrchX" in r.text
 
 
+def test_index_html_is_the_dashboard(client: TestClient) -> None:
+    """The root page must be the live dashboard, not a placeholder.
+
+    We lock this so a future refactor cannot accidentally regress
+    to a static text page.
+    """
+    r = client.get("/")
+    assert r.status_code == 200
+    # The dashboard exposes a New-run form and a list of runs.
+    assert 'id="new-run"' in r.text
+    assert 'id="runs"' in r.text
+    # And the WebSocket client is wired up.
+    assert "/api/runs/" in r.text and "/stream" in r.text
+    # The bundled descriptor samples are listed by default.
+    assert "sample_webapp_erp.yaml" in r.text
+    assert "sample_oauth_service.yaml" in r.text
+
+
 def test_create_run_with_unknown_descriptor_reports_failure(
     client: TestClient,
 ) -> None:
