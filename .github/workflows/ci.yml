@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lint + name-gate + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync dependencies (dev extras)
+        run: uv sync --extra dev
+
+      - name: Vendor name gate
+        run: python scripts/check_vendor_names.py
+
+      - name: Lint with ruff
+        run: |
+          . .venv/bin/activate
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Run tests
+        run: |
+          . .venv/bin/activate
+          pytest -v
+
+      - name: Smoke plan and deploy against mock
+        run: |
+          . .venv/bin/activate
+          orchx plan descriptors/sample_webapp_erp.yaml
+          orchx deploy descriptors/sample_webapp_erp.yaml \
+              --target mock://local --no-rollback
+          orchx deploy descriptors/sample_webapp_erp.yaml \
+              --target mock://local \
+              --chaos '{"local":[{"action":"package","exit_code":1,"fail_times":99}]}'
+
+      - name: Upload failed-run summary
+        if: failure()
+        run: |
+          echo "See the failing step's log above."
+          echo "To reproduce locally:"
+          echo "    uv sync --extra dev"
+          echo "    python scripts/check_vendor_names.py"
+          echo "    ruff check src tests"
+          echo "    pytest -v"

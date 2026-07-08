@@ -1,0 +1,82 @@
+[project]
+name = "orchx"
+version = "0.1.0a1"
+description = "Multi-system deploy orchestrator for Windows + SQL + native bridge topologies"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "OrchX Authors" }]
+keywords = ["orchestrator", "deploy", "windows", "iis", "sql-server", "automation"]
+
+dependencies = [
+    "typer>=0.12.3",
+    "rich>=13.7.1",
+    "pydantic>=2.7.0",
+    "PyYAML>=6.0.1",
+    "httpx>=0.27.0",
+    "anyio>=4.4.0",
+    "ruamel.yaml>=0.18.10",
+]
+
+[project.optional-dependencies]
+# Real transports — opt-in. MVP defaults to Mock; user opts in explicitly.
+real = [
+    "pywinrm>=0.4.2",
+    "asyncssh>=2.14.0",
+]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.7",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "freezegun>=1.5.1",
+]
+
+[project.scripts]
+orchx = "orchx.cli.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orchx"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["vendor_references/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "PIE", "RET", "SIM"]
+# Custom rule from docs/NAMING_GUIDELINES.md: vendor names must never appear.
+# We enforce this with a CI script in scripts/check_vendor_names.py (not ruff plugin).
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]
+# Typer / FastAPI / Click all call factories in default arguments by design
+# (it's how they introspect option metadata). Ruff's B008 is wrong for these.
+"src/orchx/cli/**/*.py" = ["B008"]
+# models.py constructs a discriminated-style union value at runtime, which
+# cannot be written as `A | B` (that's annotation-only sugar).
+"src/orchx/descriptor/models.py" = ["UP007"]
+
+
+[tool.ruff.lint.flake8-bugbear]  # type: ignore[list-item]
+# Extend the B008 ignore with the function factories Typer uses.
+extend-immutable-calls = [
+    "typer.Option",
+    "typer.Argument",
+    "typer.Path",
+]  # noqa: ERA001
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

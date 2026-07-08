@@ -1,0 +1,26 @@
+# Dev artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# CI / editor cruft
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Vendored specific artifacts MUST never be committed.
+# Use this directory locally to stage any vendor-specific excerpts for reference
+# but never commit its contents.
+vendor_references/
+
+# State (engine stores run history here by default; do not commit)
+state/local.sqlite
+state/logs/

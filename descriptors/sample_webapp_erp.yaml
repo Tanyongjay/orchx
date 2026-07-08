@@ -1,0 +1,110 @@
+# Sample descriptor for a generic "Web app + native bridge + DB" topology.
+# This is intentionally vendor-neutral: it could equally describe any Windows
+# web app that ships an IIS host, a native COM bridge, an SQL database, an
+# external upgrade package, and a small HTTP smoke test.
+#
+# All names ({{ ... }}) resolve at load time from system.* / defaults.* / var.*
+system:
+  name: Sample Web Application ERP
+  code: webapp_erp
+  version: 32.10.01
+
+install_root: C:\apps\webapp_erp
+
+variables:
+  db_name: "{{ system.code }}_db"
+  web_port: "80"
+  db_server: "localhost"
+
+topology:
+  roles:
+    - name: web
+      count: 1
+      description: IIS host running the application
+    - name: db
+      count: 1
+      description: SQL server backing the application
+
+steps:
+  # 1. Pre-flight: ensure the IIS role is installed.
+  - id: precheck.iis
+    type: check
+    on_host: web
+    check:
+      kind: powershell
+      script: "(Get-WindowsFeature -Name Web-Server).Installed"
+
+  # 2. Pre-flight: confirm DB server reachable.
+  - id: precheck.db
+    type: check
+    on_host: db
+    check:
+      kind: env
+      target: DB_HOST
+
+  # 3. Create the application database (idempotent).
+  - id: db.create
+    type: sql
+    on_host: db
+    sql: |
+      IF DB_ID('{{ db_name }}') IS NULL
+        CREATE DATABASE {{ db_name }};
+
+  # 4. Run schema migration script (idempotent — author must use IF NOT EXISTS).
+  - id: db.schema
+    type: sql
+    on_host: db
+    sql_file: "{{ install_root }}\\app\\db\\schema.sql"
+    database: "{{ db_name }}"
+    needs: [db.create]
+
+  # 5. Register the native bridge (32-bit COM).
+  - id: bridge.register.x86
+    type: com-register
+    on_host: web
+    file: "{{ install_root }}\\app\\native\\bin\\app-bridge-x86.dll"
+    arch: x86
+    needs: [precheck.iis]
+
+  # 6. Paired reversal.
+  - id: rev:bridge.register.x86
+    type: com-unregister
+    on_host: web
+    file: "{{ install_root }}\\app\\native\\bin\\app-bridge-x86.dll"
+    arch: x86
+
+  # 7. Create the IIS site that serves the web UI.
+  - id: iis.site.create
+    type: iis-site
+    on_host: web
+    site_name: "WebAppErpSite"
+    physical_path: "{{ install_root }}\\app\\ui"
+    port: "{{ web_port }}"
+    application_pool: "WebAppErpPool"
+    enable_32bit: true
+    parent_paths: true
+    needs: [precheck.iis, bridge.register.x86]
+
+  # 8. Paired reversal.
+  - id: rev:iis.site.create
+    type: iis-site-remove
+    on_host: web
+    site_name: "WebAppErpSite"
+
+  # 9. Stage and apply the vendor upgrade package.
+  - id: pkg.apply
+    type: package
+    on_host: web
+    src: "{{ install_root }}\\app\\upgrade\\A{{ system.version }}.zip"
+    runner: "{{ install_root }}\\app\\upgrade\\package-tool.exe"
+    needs: [iis.site.create, db.schema]
+
+  # 10. Hit the smoke endpoint until it returns 200.
+  - id: smoke.http
+    type: healthcheck
+    on_host: web
+    url: "http://localhost:{{ web_port }}/health"
+    expect_status: 200
+    interval_seconds: 5
+    max_attempts: 12
+    needs: [iis.site.create]
