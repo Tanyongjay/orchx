@@ -462,6 +462,9 @@ async function loadDescriptorOptions() {
   const samples = [
     "descriptors/sample_webapp_erp.yaml",
     "descriptors/sample_oauth_service.yaml",
+    "descriptors/sample_containerized_saas.yaml",
+    "descriptors/sample_hr_service.yaml",
+    "descriptors/sample_settle_eod.yaml",
   ];
   const sel = $("descriptor");
   sel.innerHTML = "";
@@ -613,16 +616,18 @@ function renderDetail(data) {
     </div>
   `;
   const events = (data.events || []).map(ev => {
-    const lock = secretMap[ev.step_id] ? " <span class=\"lock\" title=\"this step uses a secret\">🔐</span>" : "";
-    return `
-    <div class="event status-${ev.status}">
-      <span class="status">${ev.status}</span>
-      <span class="step">${ev.step_id || "-"}${lock}</span>
-      <span class="host">${ev.host || ""}</span>
-      <span class="msg">${escapeHtml(ev.message || "")}</span>
-    </div>
-  `;
-  }).join("");
+    const indicator = secretMap[ev.step_id]
+      ? ' <span class="lock" title="this step uses a secret">\U0001f512</span>'
+      : '';
+    return [
+      '<div class="event status-' + ev.status + '">',
+      '<span class="status">' + ev.status + '</span>',
+      '<span class="step">' + (ev.step_id || '-') + indicator + '</span>',
+      '<span class="host">' + (ev.host || '') + '</span>',
+      '<span class="msg">' + escapeHtml(ev.message || '') + '</span>',
+      '</div>',
+    ].join('');
+  }).join('');
   body.innerHTML = header + '<div class="events">' + events + "</div>";
   // Re-append cancel button if still in flight.
   if (data.state === "pending" || data.state === "running") {

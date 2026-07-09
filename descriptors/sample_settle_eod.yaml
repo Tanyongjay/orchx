@@ -117,13 +117,29 @@ steps:
     type: sql
     on_host: db
     sql: |
-      INSERT INTO deploy_ledger (system_code, version, run_label)
+      INSERT INTO deploy_ledger (system_code, version, run_label, db_name)
         VALUES (
           '{{ system.code }}',
           '{{ system.version }}',
-          '{{ run_label }}'
+          '{{ run_label }}',
+          '{{ secret.db_name }}'
         );
     needs: [db.bootstrap, cron.write]
+
+  # 8b. Write the cron job's connection string to a file the
+  #     job will read at runtime. The credentials are pulled
+  #     from the orchx vault; the file is owned by the run user
+  #     and mode 0600. This step exists so the dashboard has
+  #     at least one step that visibly uses the vault in the
+  #     timeline.
+  - id: cron.env.write
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "umask 077; echo DB_PASSWORD='{{ secret.db_password }}' > {{ install_root }}/.env && chown {{ run_user }}:{{ run_user }} {{ install_root }}/.env"
+    needs: [pip.install]
 
   # 9. Final smoke: prove the install can be imported. This
   #     catches the most common failure mode (wheel import

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,17 @@ from orchx.secrets import (
 # ---------- EnvVault ----------
 
 
+@pytest.fixture(autouse=True)
+def clean_secrets_env(monkeypatch):
+    """Scrub ORCHX_SECRET_* from the host shell so each test sees
+    a deterministic empty env and never accidentally reads a
+    real secret from the developer's machine.
+    """
+    for k in list(os.environ):
+        if k.startswith("ORCHX_SECRET_") or k == "ORCHX_SECRETS_BACKEND":
+            monkeypatch.delenv(k, raising=False)
+
+
 def test_env_vault_resolve_and_list(monkeypatch):
     monkeypatch.setenv("ORCHX_SECRET_USER", "alice")
     monkeypatch.setenv("ORCHX_SECRET_PASS", "hunter2")
@@ -29,6 +41,7 @@ def test_env_vault_resolve_and_list(monkeypatch):
 
 
 def test_env_vault_missing_raises(monkeypatch):
+    monkeypatch.setenv("ORCHX_SECRET_NOPE", "x")
     monkeypatch.delenv("ORCHX_SECRET_NOPE", raising=False)
     v = EnvVault()
     with pytest.raises(SecretNotFoundError):

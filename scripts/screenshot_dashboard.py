@@ -19,24 +19,38 @@ def main():
         page.screenshot(path=str(SHOTS / "01_empty_state.png"), full_page=True)
         print("01_empty_state.png ok")
 
-        # 2. Pick OAuth descriptor and Deploy
-        page.select_option("#descriptor", "descriptors/sample_oauth_service.yaml")
+        # 2. Deploy the settle-eod descriptor (v0.1.5 feature spotlight:
+        # it uses secrets in two of its SQL steps, so the dashboard
+        # will show 🔐 indicators next to those events).
+        page.select_option("#descriptor", "descriptors/sample_settle_eod.yaml")
         page.click("#submit")
-        # Wait for run to be selected
         page.wait_for_selector(".runs-list li", timeout=5000)
-        # Give the WebSocket time to replay the full event history
-        # and for renderDetail() to paint the final state. The mock
-        # finishes in ~30ms, but the dashboard fetches, then opens
-        # the WS, which replays history, then closes. 4s is plenty
-        # of slack on a real box and avoids flake on slow CI.
-        time.sleep(4)
+        # Wait for the detail panel to show a terminal state.
+        page.wait_for_function(
+            "() => document.querySelector('#detail-body .badge')"
+            " && (document.querySelector('#detail-body .badge').classList"
+            ".contains('ok') || document.querySelector('#detail-body .badge')"
+            ".classList.contains('failed') || document.querySelector('#detail-body .badge')"
+            ".classList.contains('aborted'))",
+            timeout=10000,
+        )
+        page.wait_for_function(
+            "() => document.getElementById('detail-body')"
+            " && document.getElementById('detail-body').innerText"
+            ".includes('run finished')",
+            timeout=10000,
+        )
+        page.wait_for_function(
+            "() => document.getElementById('detail-body')"
+            " && !document.getElementById('detail-body').innerText"
+            ".includes('Cancel run')",
+            timeout=10000,
+        )
+        time.sleep(0.5)
         page.screenshot(path=str(SHOTS / "02_dashboard_after_run.png"), full_page=True)
         print("02_dashboard_after_run.png ok")
 
-        # 3. Force a failure run via chaos JSON (set env then restart — easier to
-        #    simulate by clicking a second run; we already have one good. The
-        #    screenshot of the happy path is what the README will show.)
-        # ...we'll just take a focused screenshot of the detail panel.
+        # 3. The detail panel
         detail = page.locator("#detail").first
         detail.screenshot(path=str(SHOTS / "03_detail_timeline.png"))
         print("03_detail_timeline.png ok")

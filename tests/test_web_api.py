@@ -61,6 +61,9 @@ def test_index_html_is_the_dashboard(client: TestClient) -> None:
     # The bundled descriptor samples are listed by default.
     assert "sample_webapp_erp.yaml" in r.text
     assert "sample_oauth_service.yaml" in r.text
+    assert "sample_containerized_saas.yaml" in r.text
+    assert "sample_hr_service.yaml" in r.text
+    assert "sample_settle_eod.yaml" in r.text
 
 
 def test_create_run_with_unknown_descriptor_reports_failure(
