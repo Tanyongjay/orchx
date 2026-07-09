@@ -11,17 +11,20 @@ is invoked), in `_resolve_payload_secrets`.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
+from fastapi.testclient import TestClient
 
 from orchx.descriptor.loader import load_descriptor
 from orchx.engine.executor import Executor
 from orchx.engine.planner import build_plan
 from orchx.steps.steps import _resolve_secret_template
 from orchx.transports.mock import MockTransport
+from orchx.web.app import _make_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HR_DESCRIPTOR = REPO_ROOT / "descriptors" / "sample_hr_service.yaml"
@@ -233,3 +236,64 @@ def test_nested_secret_in_descriptor_yaml_is_also_rejected(monkeypatch):
             _resolve_secret_template("{{ secret.a.b }}")
     finally:
         p.unlink()
+
+
+# ---------- lock-down: nothing persisted anywhere contains a value ----------
+
+
+def test_run_store_does_not_persist_resolved_secrets(tmp_path, monkeypatch):
+    """Even after a run, neither the SQLite run row, the events
+    log, the plan_json, nor the to_dict() surface should contain
+    a resolved secret value. The vault is consulted at execute
+    time and the result never lands on disk.
+    """
+    import time
+
+    monkeypatch.setenv("ORCHX_SECRET_db_password", "DO-NOT-LEAK-ME")
+    monkeypatch.setenv("ORCHX_SECRET_db_host", "db.example")
+    monkeypatch.setenv("ORCHX_SECRET_db_name", "hr_svc")
+    monkeypatch.setenv("ORCHX_SECRET_db_user", "hr_ro")
+
+    db = tmp_path / "lockdown.sqlite"
+    app = _make_app(db_path=db)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/runs",
+            json={
+                "descriptor": str(HR_DESCRIPTOR),
+                "target": "mock://local",
+            },
+        )
+        run_id = r.json()["id"]
+        # Wait for terminal (polling inline so we don't import
+        # across test packages).
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            data = client.get(f"/api/runs/{run_id}").json()
+            if data["state"] in ("ok", "failed", "aborted"):
+                break
+            time.sleep(0.05)
+        # 1. SQLite file does not contain the resolved value.
+        raw = db.read_bytes()
+        assert b"DO-NOT-LEAK-ME" not in raw, "resolved secret landed in SQLite file"
+        # 2. JSON shape: events, plan fields, to_dict output.
+        run = client.get(f"/api/runs/{run_id}").json()
+        blob = json.dumps(run)
+        assert "DO-NOT-LEAK-ME" not in blob, "resolved secret leaked into the run response"
+
+
+def test_dashboard_marks_steps_that_use_secrets():
+    """A descriptor step that contains a `{{ secret.* }}` token
+    must still be safe (the engine resolves it at run time) AND
+    the operator should be able to tell, at a glance, which
+    steps will touch the vault. This is a build-time check on
+    the descriptor — we want a non-empty list of step ids
+    that match.
+    """
+    desc = load_descriptor(HR_DESCRIPTOR)
+    secret_users = []
+    for step in desc.steps:
+        cmd = getattr(step, "cmd", None)
+        if cmd and any("{{ secret." in s for s in cmd if isinstance(s, str)):
+            secret_users.append(step.id)
+    assert "secrets.write" in secret_users

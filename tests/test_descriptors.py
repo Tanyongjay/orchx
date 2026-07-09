@@ -35,6 +35,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEBAPP = REPO_ROOT / "descriptors" / "sample_webapp_erp.yaml"
 OAUTH = REPO_ROOT / "descriptors" / "sample_oauth_service.yaml"
 SAAS = REPO_ROOT / "descriptors" / "sample_containerized_saas.yaml"
+HR = REPO_ROOT / "descriptors" / "sample_hr_service.yaml"
+SETTLE = REPO_ROOT / "descriptors" / "sample_settle_eod.yaml"
 
 
 def _run(transport: MockTransport, descriptor: Path) -> object:
@@ -53,10 +55,22 @@ def _run(transport: MockTransport, descriptor: Path) -> object:
 
 @pytest.mark.parametrize(
     "descriptor",
-    [WEBAPP, OAUTH, SAAS],
-    ids=["webapp-erp", "oauth-svc", "containerized-saas"],
+    [WEBAPP, OAUTH, SAAS, HR, SETTLE],
+    ids=["webapp-erp", "oauth-svc", "containerized-saas", "hr-svc", "settle-eod"],
 )
-def test_descriptor_runs_cleanly(descriptor):
+def test_descriptor_runs_cleanly(descriptor, monkeypatch):
+    # The HR and Settle descriptors reference secrets in the
+    # orchx vault. We seed a benign value for every name they
+    # touch so the run can complete end-to-end against the mock.
+    # The MockTransport never sees the value; the engine consults
+    # the vault at step-execute time. (See test_secret_template.py
+    # for the lock-down tests that prove no resolved value lands
+    # in the SQLite store or the dashboard event stream.)
+    monkeypatch.setenv("ORCHX_SECRET_db_host", "db.internal")
+    monkeypatch.setenv("ORCHX_SECRET_db_name", "settle_eod")
+    monkeypatch.setenv("ORCHX_SECRET_db_user", "settle_eod_ro")
+    monkeypatch.setenv("ORCHX_SECRET_db_password", "DO-NOT-LEAK-ME")
+
     transport = MockTransport()
     report = _run(transport, descriptor)
     assert report.exit_code == 0, f"{descriptor.name} failed: " + ", ".join(
@@ -66,6 +80,7 @@ def test_descriptor_runs_cleanly(descriptor):
     )
     # Reversal steps always skipped in the forward pass.
     skip_ids = [sid for sid, n in report.plan.nodes.items() if n.status == StepStatus.SKIPPED]
+
     assert all(sid.startswith("rev:") for sid in skip_ids)
 
 

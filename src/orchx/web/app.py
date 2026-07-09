@@ -141,6 +141,12 @@ def _register_routes(app: FastAPI) -> None:
         events = await state.store.list_events(run_id)
         d = run.to_dict()
         d["events"] = events
+        # Expose the plan view (id + type + needs + uses_secret)
+        # so the dashboard can render the 🔐 indicator next to
+        # steps that touch the vault. The plan_json itself
+        # never contains resolved secret values — see
+        # tests/test_secret_template.py.
+        d["plan"] = json.loads(run.plan_json) if run.plan_json else []
         return d
 
     @app.get("/api/runs/{run_id}/events")
@@ -251,6 +257,28 @@ async def _run_in_background(
         return
 
     plan = build_plan(parsed)
+    # Build a per-step `uses_secret` flag so the dashboard can
+    # show a small "🔐" indicator next to steps that touch the
+    # vault. The flag is derived from a scan of the step's
+    # command/script payload for any `{{ secret.* }}` token. We
+    # never persist the resolved value; we only persist the
+    # boolean and the step id.
+    secret_users: dict[str, bool] = {}
+    for s in parsed.steps:
+        uses = False
+        cmd = getattr(s, "cmd", None)
+        if cmd and any(isinstance(c, str) and "{{ secret." in c for c in cmd):
+            uses = True
+        if not uses:
+            script = getattr(s, "script", None)
+            if isinstance(script, str) and "{{ secret." in script:
+                uses = True
+        if not uses:
+            url = getattr(s, "url", None)
+            if isinstance(url, str) and "{{ secret." in url:
+                uses = True
+        secret_users[s.id] = uses
+
     await state.store.update_run(
         run_id,
         plan_json=json.dumps(
@@ -259,6 +287,7 @@ async def _run_in_background(
                     "id": sid,
                     "type": next(s.type.value for s in parsed.steps if s.id == sid),
                     "needs": next(s.needs for s in parsed.steps if s.id == sid),
+                    "uses_secret": secret_users.get(sid, False),
                 }
                 for sid in plan.topo_order
             ]
@@ -563,6 +592,16 @@ async function selectRun(runId) {
 
 function renderDetail(data) {
   const body = $("detail-body");
+  // Build a step-id -> "uses secret" map from the plan. The
+  // dashboard surfaces a small 🔐 indicator on events whose
+  // step_id touches the vault. The plan itself never contains
+  // resolved secret values — the indicator is computed from the
+  // step's source descriptor on the server, not from the live
+  // transport.
+  const secretMap = {};
+  for (const node of (data.plan || [])) {
+    if (node.uses_secret) secretMap[node.id] = true;
+  }
   // Re-render the body each time — small N, fine.
   const header = `
     <div style="margin-bottom:12px">
@@ -573,14 +612,17 @@ function renderDetail(data) {
       </span>
     </div>
   `;
-  const events = (data.events || []).map(ev => `
+  const events = (data.events || []).map(ev => {
+    const lock = secretMap[ev.step_id] ? " <span class=\"lock\" title=\"this step uses a secret\">🔐</span>" : "";
+    return `
     <div class="event status-${ev.status}">
       <span class="status">${ev.status}</span>
-      <span class="step">${ev.step_id || "-"}</span>
+      <span class="step">${ev.step_id || "-"}${lock}</span>
       <span class="host">${ev.host || ""}</span>
       <span class="msg">${escapeHtml(ev.message || "")}</span>
     </div>
-  `).join("");
+  `;
+  }).join("");
   body.innerHTML = header + '<div class="events">' + events + "</div>";
   // Re-append cancel button if still in flight.
   if (data.state === "pending" || data.state === "running") {

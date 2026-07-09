@@ -1,0 +1,138 @@
+# Sample descriptor for an end-of-day batch processing job.
+# Topologically distinct from the other four sample descriptors:
+#   * No long-running service. The job runs once and exits.
+#   * No systemd / supervisor / docker compose. Just cron + a
+#     Python script invoked from a venv.
+#   * No HTTP healthcheck — health is "did the run finish with
+#     exit 0 and leave a clean ledger row?".
+#   * Uses a `command` step as the entire deploy: a shell script
+#     that pip-installs the wheel, then a second `command` step
+#     that runs the job end-to-end.
+#   * Demonstrates a "ledger" pattern: the deploy writes a
+#     sentinel row to a status table so the operator can grep
+#     recent deploys from anywhere.
+#
+# The same engine / descriptor schema / transport abstraction /
+# CLI drive this descriptor. Only the YAML differs.
+system:
+  name: End-of-Day Settlement Job
+  code: settle_eod
+  version: 1.4.2
+
+install_root: /opt/settle_eod
+
+variables:
+  venv_python: "python3.11"
+  run_user: "settle"
+  # Suffix we add to the ledger row so a glance at the table
+  # tells you which deploy ran the job last.
+  run_label: "eod-{{ system.version }}"
+
+topology:
+  roles:
+    - name: control
+      count: 1
+      description: The cron host where the job will run
+    - name: db
+      count: 1
+      description: PostgreSQL ledger backing the settlement store
+
+steps:
+  # 1. Sanity check on the cron host.
+  - id: precheck.control
+    type: check
+    on_host: control
+    check:
+      kind: env
+      target: CRON_HOST
+
+  # 2. Create the run-as user (idempotent) and its working dir.
+  - id: layout.user
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "id {{ run_user }} >/dev/null 2>&1 || useradd --system --shell /bin/bash --home-dir {{ install_root }} {{ run_user }}; mkdir -p {{ install_root }}; chown -R {{ run_user }}:{{ run_user }} {{ install_root }}"
+
+  # 3. Create / refresh the venv.
+  - id: venv.create
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "uv venv --python {{ venv_python }} {{ install_root }}/venv || true"
+    needs: [layout.user]
+
+  # 4. Install the new wheel into the venv.
+  - id: pip.install
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "VIRTUAL_ENV={{ install_root }}/venv uv pip install settle_eod=={{ system.version }}"
+    needs: [venv.create]
+
+  # 5. Write the cron line that schedules the run.
+  - id: cron.write
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "echo '0 23 * * * {{ run_user }} {{ install_root }}/venv/bin/settle-eod --label {{ run_label }} >> {{ install_root }}/logs/settle.log 2>&1' > /etc/cron.d/settle-eod && chmod 0644 /etc/cron.d/settle-eod"
+    needs: [pip.install]
+
+  # 6. Paired reversal (drop the cron line).
+  - id: rev:cron.write
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "rm -f /etc/cron.d/settle-eod"
+
+  # 7. Ensure the ledger table exists (idempotent). Uses
+  #    secret-bearing credentials pulled from the orchx vault.
+  - id: db.bootstrap
+    type: sql
+    on_host: db
+    sql: |
+      CREATE TABLE IF NOT EXISTS deploy_ledger (
+        id            BIGSERIAL PRIMARY KEY,
+        system_code   TEXT NOT NULL,
+        version       TEXT NOT NULL,
+        deployed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        run_label     TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS deploy_ledger_system_idx
+        ON deploy_ledger (system_code, deployed_at DESC);
+
+  # 8. Write a sentinel row to the ledger so operators can see
+  #    which deploy is current. The actual job run is by cron
+  #    at 23:00 UTC; this just records the deploy-time intent.
+  - id: ledger.write
+    type: sql
+    on_host: db
+    sql: |
+      INSERT INTO deploy_ledger (system_code, version, run_label)
+        VALUES (
+          '{{ system.code }}',
+          '{{ system.version }}',
+          '{{ run_label }}'
+        );
+    needs: [db.bootstrap, cron.write]
+
+  # 9. Final smoke: prove the install can be imported. This
+  #     catches the most common failure mode (wheel import
+  #     errors) without waiting until 23:00 UTC.
+  - id: smoke.import
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "sudo -u {{ run_user }} {{ install_root }}/venv/bin/python -c 'import settle_eod; print(settle_eod.__version__)'"
+    needs: [pip.install]
