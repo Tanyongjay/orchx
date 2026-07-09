@@ -3,6 +3,14 @@
 > **Multi-system deploy orchestrator.** Describe a stack in YAML, run it
 > against any target, watch it on a live dashboard. Vendor-neutral by policy.
 
+[![ci](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml/badge.svg)](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml)
+[![Vendor gate](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml/badge.svg?job=name-gate)](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml?query=job%3Aname-gate)
+[![ruff](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml/badge.svg?job=lint)](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml?query=job%3Alint)
+[![pytest](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml/badge.svg?job=tests)](https://github.com/Tanyongjay/orchx/actions/workflows/ci.yml?query=job%3Atests)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Version: v0.1.6](https://img.shields.io/badge/version-v0.1.6-blue.svg)](https://github.com/Tanyongjay/orchx/releases)
+
 OrchX is a generic orchestrator that describes, plans, and executes the
 deployment of arbitrary enterprise systems across heterogeneous hosts.
 It is built around a single YAML descriptor per system and a pluggable

@@ -1,0 +1,93 @@
+name: publish
+
+on:
+  # Trigger on a pushed tag matching the version pattern (vX.Y.Z).
+  # The tag becomes the PyPI release version automatically.
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  id-token: write   # required for PyPI trusted publishing (OIDC)
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Vendor name gate
+        run: python scripts/check_vendor_names.py
+
+      - name: ruff check
+        run: |
+          . .venv/bin/activate
+          ruff check src tests
+
+      - name: ruff format --check
+        run: |
+          . .venv/bin/activate
+          ruff format --check src tests
+
+      - name: Run tests
+        run: |
+          . .venv/bin/activate
+          pytest -v
+
+      - name: Build sdist + wheel
+        run: |
+          . .venv/bin/activate
+          python -m build --sdist --wheel --outdir dist/
+
+      - name: twine check
+        run: |
+          . .venv/bin/activate
+          python -m twine check dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # `environment:` provides a manual approval gate. Add the
+    # environment in the GitHub repo settings (Settings →
+    # Environments → pypi) and add yourself as a required reviewer.
+    # This prevents accidental publishes.
+    environment: pypi
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No API token is needed — PyPI trusted publishing
+        # authenticates via OIDC using the `id-token: write`
+        # permission at the top of this file. Configure the
+        # trusted publisher at https://pypi.org/manage/account/publishing/

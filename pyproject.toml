@@ -1,13 +1,24 @@
 [project]
 name = "orchx"
-version = "0.1.0a1"
-description = "Multi-system deploy orchestrator for Windows + SQL + native bridge topologies"
+version = "0.1.6"
+description = "Vendor-neutral multi-system deploy orchestrator"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
 authors = [{ name = "OrchX Authors" }]
-keywords = ["orchestrator", "deploy", "windows", "iis", "sql-server", "automation"]
-
+keywords = ["orchestrator", "deploy", "automation", "yaml", "dag", "rollback"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "typer>=0.12.3",
     "rich>=13.7.1",

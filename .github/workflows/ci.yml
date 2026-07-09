@@ -10,8 +10,60 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: lint + name-gate + tests
+  # Each step is its own job so each can carry its own status
+  # badge in the README. The test job additionally runs the
+  # smoke plan+deploy against the mock to verify the CLI end
+  # to end.
+
+  name-gate:
+    name: Vendor name gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run vendor name gate
+        run: python scripts/check_vendor_names.py
+
+  lint:
+    name: ruff check + format
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync dependencies (dev extras)
+        run: uv sync --extra dev
+
+      - name: ruff check
+        run: |
+          . .venv/bin/activate
+          ruff check src tests
+
+      - name: ruff format --check
+        run: |
+          . .venv/bin/activate
+          ruff format --check src tests
+
+  tests:
+    name: pytest (81 tests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -30,15 +82,6 @@ jobs:
 
       - name: Sync dependencies (dev extras)
         run: uv sync --extra dev
-
-      - name: Vendor name gate
-        run: python scripts/check_vendor_names.py
-
-      - name: Lint with ruff
-        run: |
-          . .venv/bin/activate
-          ruff check src tests
-          ruff format --check src tests
 
       - name: Run tests
         run: |
@@ -66,13 +109,3 @@ jobs:
             exit 1
           fi
           echo "chaos deploy exited with $chaos_rc as expected"
-
-      - name: Upload failed-run summary
-        if: failure()
-        run: |
-          echo "See the failing step's log above."
-          echo "To reproduce locally:"
-          echo "    uv sync --extra dev"
-          echo "    python scripts/check_vendor_names.py"
-          echo "    ruff check src tests"
-          echo "    pytest -v"
