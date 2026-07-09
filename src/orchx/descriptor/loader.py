@@ -21,25 +21,71 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from orchx import secrets as _secrets
 from orchx.descriptor.models import Descriptor
 
-_TOKEN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_\.]*)\s*\}\}")
+_BLOCK = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
+_PATH_AND_FILTER = re.compile(
+    r"^\s*"
+    r"(?P<path>[a-zA-Z_][a-zA-Z0-9_\.]*)"
+    r"(?:\s*\|\s*default\(\s*"
+    r"(?P<defq>['\"])"
+    r"(?P<defval>[^'\"]*)"
+    r"(?P=defq)"
+    r"\s*\))?"
+    r"\s*$",
+)
+
+# Tiny filter set supported in templates. We do NOT want a full
+# Jinja2 here; we only need the one filter the sample descriptors
+# actually use.
+_FILTER_DEFAULT = "default"
 
 
 def render_template(value: Any, ctx: dict[str, Any]) -> Any:
-    """Recursively substitute ``{{ name.path }}`` inside ``value``."""
+    """Recursively substitute ``{{ name.path | default("...") }}`` inside ``value``.
+
+    Filters supported: ``default("...")`` and ``default('...')``.
+    The default is used only if the lookup raises ``KeyError``;
+    a non-empty resolved value is returned as-is even if the
+    literal evaluates to an empty string.
+    """
     if isinstance(value, str):
 
         def repl(m: re.Match[str]) -> str:
-            key = m.group(1)
+            inner = m.group(1)
+            pm = _PATH_AND_FILTER.match(inner)
+            if pm is None:
+                raise KeyError(f"malformed template expression: {inner!r}")
+            path = pm.group("path")
+            default = pm.group("defval")  # may be None
+            # Secret references are intentionally NOT resolved at
+            # descriptor-load time. The vault must never be
+            # consulted from `load_descriptor` (which is called
+            # by `orchx plan`, by the web control plane when a
+            # run is created, etc.) — doing so would leak resolved
+            # values into the descriptor model in memory, into
+            # the SQLite run log on disk, and into the dashboard
+            # event stream.
+            # The engine resolves `secret.*` only at the moment
+            # the command is about to be sent to the transport,
+            # and even then it never persists the resolved value
+            # into the plan model.
+            if path == "secret" or path.startswith("secret."):
+                return m.group(0)  # leave the {{ ... }} block untouched
             cur: Any = ctx
-            for part in key.split("."):
-                if not isinstance(cur, dict) or part not in cur:
-                    raise KeyError(f"unknown template variable: {key!r}")
-                cur = cur[part]
-            return str(cur)
+            try:
+                for part in path.split("."):
+                    if not hasattr(cur, "__getitem__"):
+                        raise KeyError(path)
+                    cur = cur[part]
+                return str(cur)
+            except KeyError as e:
+                if default is not None:
+                    return default
+                raise KeyError(f"unknown template variable: {path!r}") from e
 
-        return _TOKEN.sub(repl, value)
+        return _BLOCK.sub(repl, value)
     if isinstance(value, dict):
         return {k: render_template(v, ctx) for k, v in value.items()}
     if isinstance(value, list):
@@ -55,10 +101,103 @@ def _ctx_from_descriptor(desc: Descriptor) -> dict[str, Any]:
     }
     if desc.install_root is not None:
         out["install_root"] = str(desc.install_root)
+    out["secret"] = _SecretLookup()
     # Variables are also exposed as top-level tokens for ergonomics:
     # `{{ db_name }}` works as well as `{{ var.db_name }}`.
     out.update(desc.variables)
     return out
+
+
+def _ctx_with_secrets() -> dict[str, Any]:
+    """Build a template context that contains ONLY a fresh
+    ``secret`` namespace.
+
+    Used by the engine at step-execution time to resolve
+    `{{ secret.x }}` references that were intentionally left
+    unresolved at load time. We deliberately omit `system`,
+    `var`, `defaults`, etc. — the engine already substituted
+    those at load, and any remaining `{{ secret.x }}` token in
+    a step's command is exactly what we want to resolve here.
+    """
+    return {"secret": _SecretLookup()}
+
+
+class _SecretLookup(dict):
+    """Adapter that turns `{{ secret.x }}` into a vault lookup.
+
+    Inherits ``dict`` so the dotted-path renderer can pick it up
+    via ``cur[part]`` and we don't have to special-case the
+    renderer. The first access instantiates a per-key proxy;
+    the proxy resolves on ``str()`` and writes the result back
+    into this dict so the next render of the same descriptor
+    reuses the cached value.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()  # empty dict
+        self._resolved: dict[str, str] = {}
+
+    def __missing__(self, name: str) -> _SecretValue:
+        proxy = _SecretValue(self, name)
+        # Cache the proxy in the dict so repeated renders don't
+        # keep creating new proxies. The proxy resolves on str()
+        # and updates the cache via _cache() below.
+        self[name] = proxy
+        return proxy
+
+    def _cache(self, name: str, value: str) -> None:
+        """Called by a proxy after it has resolved the secret.
+
+        Stores the resolved value in ``self[name]`` so subsequent
+        ``str(lookup[name])`` calls return without going through
+        the vault again.
+        """
+        self._resolved[name] = value
+        self[name] = value
+
+
+class _SecretValue:
+    """One-shot proxy for a single secret.
+
+    Behaves as a mapping on the way down the dotted path (so the
+    existing template renderer can walk into it), and as a string
+    on the way back out (so the renderer's final ``str(cur)``
+    returns the resolved value). The single-key convention is
+    `{{ secret.<name> }}`; nesting (`{{ secret.a.b }}`) is
+    rejected because the secrets store is flat by name.
+    """
+
+    __slots__ = ("_parent", "_name", "_resolved")
+
+    def __init__(self, parent: _SecretLookup, name: str) -> None:
+        self._parent = parent
+        self._name = name
+        self._resolved: str | None = None
+
+    def __getitem__(self, key: str) -> _SecretValue:
+        # Any further dotted access past the secret name is
+        # rejected: we don't support nested secret names.
+        raise KeyError(f"secret reference is not nestable: {self._name!r}")
+
+    def __str__(self) -> str:
+        if self._resolved is not None:
+            return self._resolved
+        # First access — ask the vault, then cache in the parent
+        # so subsequent renders of the same descriptor don't
+        # touch the vault again.
+        value = _secrets.get_vault().resolve(self._name)
+        self._resolved = value
+        self._parent._cache(self._name, value)
+        return value
+
+    def __repr__(self) -> str:
+        return f"_SecretValue({self._name!r})"
+
+    def __iter__(self):  # pragma: no cover — defensive
+        raise TypeError("secret reference is a scalar, not a mapping")
+
+    def keys(self):  # pragma: no cover — defensive
+        raise TypeError("secret reference is a scalar, not a mapping")
 
 
 def load_descriptor(

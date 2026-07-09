@@ -13,9 +13,11 @@ not touch the network, disk, OS, or registry directly.
 from __future__ import annotations
 
 import abc
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from orchx import secrets as _secrets
 from orchx.descriptor.models import (
     CheckStep,
     CommandStep,
@@ -406,6 +408,78 @@ def build_step_adapter(step: StepSpec, host: str) -> BuiltinStep:
 
 # ---- step runner -----------------------------------------------------
 
+# Token that the engine looks for in any string-typed action
+# payload value. Found anywhere in a string, the value is passed
+# through `_resolve_secret_template` to substitute `{{ secret.x }}`
+# references via the live vault. We do this at the very last
+# possible moment — right before the transport is invoked — so
+# the resolved value is never persisted in the run log, the SQLite
+# store, or the dashboard event stream.
+_SECRET_TOKEN = re.compile(r"\{\{[^{}]*secret\.[^{}]*\}\}")
+
+
+def _resolve_secret_template(s: str) -> str:
+    """Resolve ``{{ secret.x }}`` references in ``s`` via the vault.
+
+    Only secret references are touched. Non-secret templates
+    (``{{ system.version }}`` etc.) were already resolved at
+    descriptor-load time and must NOT be re-resolved here, because
+    the engine does not carry a descriptor into execute_step.
+
+    A fresh ``_SecretLookup`` is used on every call so that a
+    resolved value never sits in module-level memory longer than
+    a single transport call.
+    """
+    from orchx.descriptor.loader import _BLOCK as _TPL_BLOCK
+    from orchx.descriptor.loader import _PATH_AND_FILTER as _TPL_PARSE
+
+    if "{{" not in s:
+        return s
+
+    def repl(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        pm = _TPL_PARSE.match(inner)
+        if pm is None:
+            return m.group(0)
+        path = pm.group("path")
+        default = pm.group("defval")  # may be None
+        # Only handle the `secret` namespace; leave others alone.
+        if path == "secret":
+            # Bare `{{ secret }}` is not a valid reference (it
+            # is the namespace itself, not a name). Surface as
+            # unknown so the operator can fix the descriptor.
+            raise KeyError("unknown template variable: 'secret' (need 'secret.<name>')")
+        if not path.startswith("secret."):
+            return m.group(0)
+        secret_name = path[len("secret.") :]
+        if "|" in secret_name or " " in secret_name:
+            # Defensive: the path should already be split.
+            return m.group(0)
+        try:
+            return _secrets.get_vault().resolve(secret_name)
+        except KeyError as e:
+            if default is not None:
+                return default
+            raise KeyError(f"unknown template variable: {path!r}") from e
+
+    return _TPL_BLOCK.sub(repl, s)
+
+
+def _resolve_payload_secrets(payload: dict[str, object]) -> dict[str, object]:
+    """Recursively walk a step action payload and resolve any
+    `{{ secret.x }}` tokens in string leaves. Non-string leaves
+    (paths, ports, etc.) are passed through unchanged.
+    """
+    out: dict[str, object] = {}
+    for k, v in payload.items():
+        if isinstance(v, str):
+            out[k] = _resolve_secret_template(v)
+        elif isinstance(v, list):
+            out[k] = [_resolve_secret_template(x) if isinstance(x, str) else x for x in v]
+        else:
+            out[k] = v
+    return out
+
 
 async def execute_step(
     adapter: BuiltinStep,
@@ -424,6 +498,17 @@ async def execute_step(
     )
 
     action = adapter.forward_action()
+    # Last-mile secret resolution. Mutates the action's payload
+    # in place so the transport sees resolved strings but the
+    # descriptor model on disk is unchanged.
+    try:
+        action = Action(
+            kind=action.kind,
+            host=action.host,
+            payload=_resolve_payload_secrets(action.payload),
+        )
+    except KeyError as e:
+        return (False, f"secret resolution failed: {e}")
     try:
         if action.kind == "powershell":
             res = await transport.run_powershell(

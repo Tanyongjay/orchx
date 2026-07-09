@@ -1,0 +1,152 @@
+# Sample descriptor for a small internal HR service.
+# Topologically distinct from the other four sample descriptors:
+#   * No Windows, no IIS, no COM, no docker compose, no systemd.
+#   * Python venv + uwsgi + supervisor (NOT systemd) for the
+#     service manager. This is a real-world pattern for legacy
+#     internal services that were deployed before systemd and
+#     nobody migrated them.
+#   * Demonstrates secrets in the descriptor: the venv
+#     activation script writes a `.env` file with database
+#     credentials pulled from the orchx secret store, so the
+#     credentials never appear in the YAML and never in the
+#     deploy log.
+#   * Postgres already exists; the descriptor is the *service*,
+#     not the database. db.bootstrap is omitted.
+#   * Healthcheck uses the http:// scheme against a real endpoint
+#     (we ship /healthz in the sample app).
+#
+# The same engine / descriptor schema / transport abstraction /
+# CLI drive this descriptor. Only the YAML differs.
+system:
+  name: Internal HR Self-Service
+  code: hr_svc
+  version: 2.1.0
+
+install_root: /opt/hr_svc
+
+variables:
+  app_port: "9090"
+  python: "python3.11"
+
+topology:
+  roles:
+    - name: app
+      count: 1
+      description: Linux host running the HR service under supervisor
+
+steps:
+  # 1. Sanity check on the application host.
+  - id: precheck.app
+    type: check
+    on_host: app
+    check:
+      kind: env
+      target: APP_HOST
+
+  # 2. Make sure the runtime dirs exist (idempotent).
+  - id: layout.dirs
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "mkdir -p {{ install_root }}/venv {{ install_root }}/run {{ install_root }}/logs"
+
+  # 3. Create the python venv (idempotent — uv venv will skip
+  #    if it already exists, but we wrap it so the test runs
+  #    in mock don't care).
+  - id: venv.create
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "uv venv --python {{ python }} {{ install_root }}/venv || true"
+    needs: [layout.dirs]
+
+  # 4. Write the .env file with secrets pulled from the orchx
+  #    secret store. The descriptor never contains the literal
+  #    password; it asks for it by name and the operator wires
+  #    a vault backend at deploy time (env vars, file, or HTTP).
+  #    The {{ secret.* }} substitution happens at load time on
+  #    the control host, so the YAML you see is what you get.
+  - id: secrets.write
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "cat > {{ install_root }}/.env <<EOF
+        DB_HOST={{ secret.db_host }}
+        DB_PORT={{ secret.db_port | default(\"5432\") }}
+        DB_NAME={{ secret.db_name }}
+        DB_USER={{ secret.db_user }}
+        DB_PASSWORD={{ secret.db_password }}
+        EOF
+        chmod 600 {{ install_root }}/.env"
+    needs: [layout.dirs]
+
+  # 5. Install / upgrade the application into the venv. We use
+  #    `uv pip install` against a wheel built elsewhere (the
+  #    wheel is what the release pipeline produces).
+  - id: pip.install
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "VIRTUAL_ENV={{ install_root }}/venv uv pip install hr_svc=={{ system.version }}"
+    needs: [venv.create]
+
+  # 6. Stop the running service before we touch the binary.
+  - id: supervisor.stop
+    type: command
+    on_host: app
+    cmd: [supervisorctl, -c, /etc/supervisor/supervisord.conf, stop, hr_svc]
+
+  # 7. Paired reversal.
+  - id: rev:supervisor.stop
+    type: command
+    on_host: app
+    cmd: [supervisorctl, -c, /etc/supervisor/supervisord.conf, start, hr_svc]
+
+  # 8. Wait for the old process to actually exit. We use a
+  #    command (not a healthcheck) because we want a NEGATIVE
+  #    assertion: success means the port is unreachable. The
+  #    healthcheck step's expect_status is always interpreted as
+  #    "this exact status means healthy"; we want "anything-but-200".
+  - id: supervisor.wait_exit
+    type: command
+    on_host: app
+    cmd:
+      - /bin/sh
+      - -c
+      - "curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:{{ app_port }}/healthz | grep -q '^200$' && exit 1 || exit 0"
+    needs: [supervisor.stop]
+
+  # 9. (re)start under supervisor. supervisorctl re-reads the
+  #    conf and restarts the process group if the command changed.
+  - id: supervisor.start
+    type: command
+    on_host: app
+    cmd: [supervisorctl, -c, /etc/supervisor/supervisord.conf, restart, hr_svc]
+    needs: [pip.install, supervisor.wait_exit]
+
+  # 10. Paired reversal.
+  - id: rev:supervisor.start
+    type: command
+    on_host: app
+    cmd: [supervisorctl, -c, /etc/supervisor/supervisord.conf, stop, hr_svc]
+
+  # 11. Healthcheck against the real /healthz endpoint. The
+  #     expect_status is 200 this time (we are checking the
+  #     *new* process is up). If the app hangs on startup
+  #     this times out and we rollback.
+  - id: smoke.http
+    type: healthcheck
+    on_host: app
+    url: "http://127.0.0.1:{{ app_port }}/healthz"
+    expect_status: 200
+    interval_seconds: 2
+    max_attempts: 30
+    needs: [supervisor.start]
