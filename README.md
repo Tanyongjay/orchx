@@ -27,7 +27,14 @@ the box.
   of every OK step on forward failure
 - **FastAPI control plane** — REST + WebSocket + SQLite for run history
 - **Live dashboard** — pick a descriptor, hit Deploy, watch the timeline
-- **66 tests**, ruff clean, vendor-name CI gate, GitHub Actions
+- **🔐 Secret-aware UI** — events whose step touches the orchx vault
+  show a 🔐 indicator on the timeline. Secrets are resolved only at
+  step-execute time and never land in the descriptor model, the SQLite
+  store, the event stream, or test fixtures
+- **5 sample descriptors** — Windows/IIS, Linux/systemd, Linux/docker
+  compose, Linux/Python venv/supervisor, Linux/cron. Same engine
+  drives all of them
+- **81 tests**, ruff clean, vendor-name CI gate, GitHub Actions
 
 ## Quick start
 
@@ -45,18 +52,19 @@ uv run python -m orchx.web.app
 # open http://localhost:8000/ in a browser
 ```
 
-## Two sample descriptors, two stacks
+## Five sample descriptors, five stacks
 
-| | `sample_webapp_erp.yaml` | `sample_oauth_service.yaml` |
-|---|---|---|
-| Host | Windows (IIS, COM, SQL Server) | Linux (systemd, PostgreSQL) |
-| Web | `iis-site` step | `command: [systemctl, ...]` |
-| Database | SQL Server (T-SQL) | PostgreSQL (DO block) |
-| Package | zip | tarball |
-| Healthcheck | `http://.../health` | `tcp://127.0.0.1:7700` |
-| Steps | 10 | 11 |
+| | `sample_webapp_erp.yaml` | `sample_oauth_service.yaml` | `sample_containerized_saas.yaml` | `sample_hr_service.yaml` | `sample_settle_eod.yaml` |
+|---|---|---|---|---|---|
+| Host | Windows (IIS, COM, SQL) | Linux (systemd, PostgreSQL) | Linux (docker compose) | Linux (venv, uwsgi, supervisor) | Linux (cron, Python venv) |
+| Service | IIS site | systemd unit | 3 containers (app, worker, db) | uwsgi under supervisor | **no service** — cron job |
+| Bridge | COM | — | — | — | — |
+| Database | SQL Server | PostgreSQL | PostgreSQL | PostgreSQL | PostgreSQL (ledger) |
+| Healthcheck | `http://…/health` | `tcp://…:7700` | 3× `tcp://` | `http://…/healthz` | wheel-import smoke |
+| Uses secrets | no | no | no | **yes** | **yes** |
+| Steps | 10 | 11 | 15 | 11 | 10 |
 
-The same engine / executor / CLI / dashboard drive both. See
+The same engine / executor / CLI / dashboard drive all five. See
 [`docs/SAMPLE_TOPOLOGIES.md`](docs/SAMPLE_TOPOLOGIES.md) for the
 side-by-side.
 
@@ -131,6 +139,7 @@ guarded name list and the rationale.
 |---|---|---|
 | MVP-1 | Engine + Mock transport + sample descriptor | ✅ shipped |
 | MVP-2 | WinRM + SSH transports, retries, rollback | ✅ shipped |
-| v0.1  | FastAPI control plane, dashboard, secrets | ✅ shipped |
+| v0.1  | FastAPI control plane, dashboard, secrets, 🔐 indicator | ✅ shipped |
+| v0.2  | Operational hardening (see [`docs/ROADMAP.md`](docs/ROADMAP.md)) | 🟡 in progress |
 
 See [`docs/CI.md`](docs/CI.md) for the current green build.
