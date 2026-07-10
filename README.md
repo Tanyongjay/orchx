@@ -47,9 +47,16 @@ the box.
 ## Quick start
 
 ```bash
-# 1. Install
-uv sync --extra dev        # base + dev tools (mock transport only)
-uv sync --extra real       # add pywinrm + asyncssh for real targets
+# Option A — install from GitHub (recommended for v0.2.x while
+# the project is between PyPI releases)
+pip install "git+https://github.com/Tanyongjay/orchx.git@v0.2.0"
+
+# Option B — clone and install (gives you the sample
+# descriptors + the docs too)
+git clone https://github.com/Tanyongjay/orchx.git
+cd orchx
+uv sync --extra dev          # base + dev tools (mock transport only)
+uv sync --extra real         # add pywinrm + asyncssh for real targets
 
 # 2. CLI: plan + deploy against the mock
 orchx plan  descriptors/sample_webapp_erp.yaml
