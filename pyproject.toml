@@ -51,6 +51,15 @@ dev = [
     "uvicorn[standard]>=0.29.0",
     "aiosqlite>=0.20.0",
     "httpx>=0.27.0",  # used by TestClient in web tests
+    # In-process SSH e2e tests (test_ssh_e2e.py) need
+    # asyncssh both as the client and as the server. We
+    # also pin the [real] extras so the test environment
+    # matches the real-target production environment.
+    "asyncssh>=2.14.0",
+    # Per-test timeouts in tests/test_ssh_e2e.py. Defends
+    # against the in-process asyncssh server hanging on
+    # Windows (skipped) or any other unexpected stall.
+    "pytest-timeout>=2.0",
 ]
 
 [project.scripts]

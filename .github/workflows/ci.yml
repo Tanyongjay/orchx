@@ -109,3 +109,38 @@ jobs:
             exit 1
           fi
           echo "chaos deploy exited with $chaos_rc as expected"
+
+  e2e-ssh:
+    name: e2e ssh transport (in-process server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The e2e tests are gated to Linux only because asyncssh
+    # 2.x's SSHServer relies on ProactorEventLoop + a low-level
+    # select primitive that can wedge on Windows. The tests
+    # themselves are Linux-only by design (CI marker), so
+    # running them on ubuntu-latest is the canonical case.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync dependencies (dev + real)
+        # The [dev] extra now pulls in asyncssh (added in
+        # v0.2.x) so the [real] extra is technically redundant
+        # here, but we keep it explicit so the intent — "this
+        # job exercises the real-SSH path" — is obvious.
+        run: uv sync --extra dev --extra real
+
+      - name: Run e2e SSH tests
+        run: |
+          . .venv/bin/activate
+          pytest -v tests/test_ssh_e2e.py
