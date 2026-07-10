@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+
+# We don't import Depends because the auth gate is a
+# middleware, not a per-route dependency. Per-route
+# dependencies don't compose with the WebSocket endpoint
+# (we'd need a separate code path there anyway), and a
+# middleware is one well-known place to look for "the
+# thing that gates access to /api/*".
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +37,11 @@ from orchx.descriptor.loader import load_descriptor
 from orchx.engine.executor import Executor
 from orchx.engine.planner import build_plan
 from orchx.transports import get_transport
+from orchx.web.auth import (
+    AuthConfig,
+    auth_config_from_env,
+    websocket_check_token,
+)
 from orchx.web.store import RunRecord, RunStore
 
 
@@ -38,6 +50,11 @@ class AppState:
     store: RunStore
     tasks: dict[str, asyncio.Task[None]]
     cancel_events: dict[str, asyncio.Event]
+    # The auth config is loaded once at app startup from
+    # environment variables. Routes that need to gate on
+    # credentials reach for ``state.auth_config`` rather
+    # than re-reading the environment on every request.
+    auth_config: AuthConfig
 
 
 class RunRequest(BaseModel):
@@ -48,14 +65,30 @@ class RunRequest(BaseModel):
 DEFAULT_DB = Path("state/local.sqlite")
 
 
-def _make_app(db_path: Path | None = None) -> FastAPI:
+def _make_app(
+    db_path: Path | None = None,
+    auth_config: AuthConfig | None = None,
+) -> FastAPI:
     db = db_path or DEFAULT_DB
+    # If the caller did not pass an explicit AuthConfig,
+    # read one from the process environment. This is the
+    # normal path for ``uv run python -m orchx.web.app``;
+    # tests pass a hand-rolled AuthConfig so they can
+    # exercise the auth paths without touching the
+    # environment.
+    if auth_config is None:
+        auth_config = auth_config_from_env()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:
         store = RunStore(db)
         await store.init()
-        state = AppState(store=store, tasks={}, cancel_events={})
+        state = AppState(
+            store=store,
+            tasks={},
+            cancel_events={},
+            auth_config=auth_config,
+        )
         app.state.orchx = state
         try:
             yield
@@ -83,11 +116,75 @@ def _make_app(db_path: Path | None = None) -> FastAPI:
     return app
 
 
+# The auth gate is a middleware inside _register_routes
+# below; see the comment block at the top of
+# _register_routes for the rationale.
+
+
 def _register_routes(app: FastAPI) -> None:
+    from starlette.responses import JSONResponse as _JR
+
+    @app.middleware("http")
+    async def _auth_middleware(request, call_next):
+        # The middleware covers every HTTP request that
+        # arrives, but only GATES the paths that the
+        # auth_config says require credentials. /healthz
+        # and /api/auth are always open (the former is a
+        # liveness probe; the latter tells the dashboard
+        # whether a login screen is needed).
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        if request.url.path == "/api/auth":
+            return await call_next(request)
+        config = request.app.state.orchx.auth_config
+        if config.mode == "none":
+            return await call_next(request)
+        if config.mode == "api_key":
+            from orchx.web.auth import _check_api_key, _extract_bearer, _extract_query_token
+
+            token = _extract_bearer(request) or _extract_query_token(request)
+            if token is None or not _check_api_key(config, token):
+                return _JR(
+                    {"detail": "authentication required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Bearer realm="orchx"'},
+                )
+            return await call_next(request)
+        if config.mode == "basic":
+            from orchx.web.auth import _check_basic, _extract_basic
+
+            creds = _extract_basic(request)
+            if creds is None or not _check_basic(config, creds[0], creds[1]):
+                return _JR(
+                    {"detail": "authentication required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Basic realm="orchx"'},
+                )
+            return await call_next(request)
+        return await call_next(request)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
+        # /healthz is intentionally unauthenticated so load
+        # balancers and uptime monitors can probe liveness
+        # without a credential. It exposes no run data.
         return {"status": "ok"}
+
+    @app.get("/api/auth")
+    async def auth_status() -> dict[str, object]:
+        # The dashboard uses this endpoint to decide whether
+        # to show a login screen. The response is safe to
+        # expose to anonymous callers — it only describes
+        # whether auth is required and, in basic mode, the
+        # username. Never the secret.
+        # We resolve AppState from the app reference the
+        # decorator captured rather than taking a ``Request``
+        # parameter, because the latter would make FastAPI
+        # try to bind it as a query parameter (it doesn't
+        # know Request is a special type at function-signature
+        # parsing time when there are no other parameters).
+        state: AppState = app.state.orchx
+        return state.auth_config.describe()
 
     @app.get("/api/runs")
     async def list_runs(
@@ -197,6 +294,15 @@ def _register_routes(app: FastAPI) -> None:
     @app.websocket("/api/runs/{run_id}/stream")
     async def stream(ws: WebSocket, run_id: str) -> None:
         state: AppState = app.state.orchx
+        # Auth gate. The WebSocket cannot easily return a 401
+        # after accept() (the spec doesn't allow status codes
+        # on the upgrade response from a server-pushed
+        # policy), so we close the connection with code
+        # 1008 (policy violation) when the credential is
+        # missing or wrong.
+        if not websocket_check_token(state.auth_config, ws):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         try:
             for ev in await state.store.list_events(run_id):
