@@ -459,7 +459,26 @@ _INDEX_HTML = """
 
   <section class="panel" id="runs-panel">
     <h2>Runs</h2>
+    <div class="row" style="margin-bottom:8px">
+      <label style="font-size:12px;color:#8b949e">
+        State:
+        <select id="state-filter" onchange="onFilterChange()" style="margin-left:4px">
+          <option value="">all</option>
+          <option value="pending">pending</option>
+          <option value="running">running</option>
+          <option value="ok">ok</option>
+          <option value="failed">failed</option>
+          <option value="aborted">aborted</option>
+        </select>
+      </label>
+      <span id="runs-summary" style="margin-left:auto;font-size:12px;color:#8b949e"></span>
+    </div>
     <ul class="runs-list" id="runs"></ul>
+    <div class="row" style="margin-top:8px;align-items:center">
+      <button class="secondary" id="prev-page" onclick="prevPage()" disabled>&laquo; Prev</button>
+      <span id="page-info" style="margin:0 12px;font-size:12px;color:#8b949e">Page 1 of 1</span>
+      <button class="secondary" id="next-page" onclick="nextPage()" disabled>Next &raquo;</button>
+    </div>
   </section>
 
   <section class="panel" id="detail" style="grid-column: 1 / -1;">
@@ -516,11 +535,20 @@ async function loadDescriptorOptions() {
   });
 }
 
+// Pagination + filter state.
+let currentPage = 0;
+const PAGE_SIZE = 25;
+let currentStateFilter = "";
+
 async function refreshRuns() {
-  let runs = [];
+  let data = { runs: [], total: 0, limit: PAGE_SIZE, offset: 0 };
   try {
-    const r = await fetch("/api/runs");
-    runs = await r.json();
+    const params = new URLSearchParams();
+    params.set("limit", String(PAGE_SIZE));
+    params.set("offset", String(currentPage * PAGE_SIZE));
+    if (currentStateFilter) params.set("state_filter", currentStateFilter);
+    const r = await fetch("/api/runs?" + params.toString());
+    data = await r.json();
   } catch (e) {
     $("runs").innerHTML = '<li class="empty">API unreachable.</li>';
     return;
@@ -528,28 +556,57 @@ async function refreshRuns() {
   const ul = $("runs");
   const prev = selectedRunId;
   ul.innerHTML = "";
+  const runs = data.runs || [];
   if (!runs.length) {
     ul.innerHTML = '<li class="empty">No runs yet — kick one off above.</li>';
-    return;
-  }
-  for (const r of runs) {
-    const li = document.createElement("li");
-    li.dataset.id = r.id;
-    if (r.id === prev) li.classList.add("selected");
-    li.onclick = () => selectRun(r.id);
-    const target = r.target || "";
-    const truncated = r.id.length > 12 ? r.id.slice(0, 8) + "…" : r.id;
-    li.innerHTML = `
-      <div class="row">
-        <div>
-          <div><code>${truncated}</code> <span class="badge ${r.state}">${r.state}</span></div>
-          <div class="id">${escapeHtml(target)}</div>
+  } else {
+    for (const r of runs) {
+      const li = document.createElement("li");
+      li.dataset.id = r.id;
+      if (r.id === prev) li.classList.add("selected");
+      li.onclick = () => selectRun(r.id);
+      const target = r.target || "";
+      const truncated = r.id.length > 12 ? r.id.slice(0, 8) + "…" : r.id;
+      li.innerHTML = `
+        <div class="row">
+          <div>
+            <div><code>${truncated}</code> <span class="badge ${r.state}">${r.state}</span></div>
+            <div class="id">${escapeHtml(target)}</div>
+          </div>
+          <button class="secondary" onclick="event.stopPropagation(); selectRun('${r.id}')">view</button>
         </div>
-        <button class="secondary" onclick="event.stopPropagation(); selectRun('${r.id}')">view</button>
-      </div>
-    `;
-    ul.appendChild(li);
+      `;
+      ul.appendChild(li);
+    }
   }
+  // Pagination chrome.
+  const total = data.total || 0;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = currentPage + 1;
+  $("page-info").textContent = `Page ${page} of ${pageCount} · ${total} total`;
+  $("prev-page").disabled = currentPage === 0;
+  $("next-page").disabled = currentPage >= pageCount - 1;
+  $("runs-summary").textContent = currentStateFilter
+    ? `filtered: ${currentStateFilter}`
+    : "";
+}
+
+function onFilterChange() {
+  currentStateFilter = $("state-filter").value;
+  currentPage = 0;
+  refreshRuns();
+}
+
+function prevPage() {
+  if (currentPage > 0) {
+    currentPage--;
+    refreshRuns();
+  }
+}
+
+function nextPage() {
+  currentPage++;
+  refreshRuns();
 }
 
 async function submitRun() {

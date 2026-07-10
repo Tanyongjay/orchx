@@ -64,6 +64,11 @@ def test_index_html_is_the_dashboard(client: TestClient) -> None:
     assert "sample_containerized_saas.yaml" in r.text
     assert "sample_hr_service.yaml" in r.text
     assert "sample_settle_eod.yaml" in r.text
+    # The dashboard exposes the new pagination + filter chrome.
+    assert 'id="state-filter"' in r.text
+    assert 'id="prev-page"' in r.text
+    assert 'id="next-page"' in r.text
+    assert "Page 1 of 1" in r.text
 
 
 def test_create_run_with_unknown_descriptor_reports_failure(
