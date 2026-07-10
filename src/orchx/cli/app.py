@@ -8,6 +8,7 @@ Commands:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -109,6 +110,17 @@ def deploy(
             '\'{"host1":[{"action":"iis-site","exit_code":1,"fail_times":1}]}\''
         ),
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Print structured log lines (one JSON per event) to stderr.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit a single JSON RunReport to stdout and skip the rich UI.",
+    ),
 ) -> None:
     """Deploy against the chosen transport."""
     from orchx.secrets import get_vault, substitute_secrets
@@ -141,18 +153,31 @@ def deploy(
 
     transport = get_transport(target)
 
+    if json_output:
+        # The JSON path is for scripting: suppress rich, capture
+        # structured events, and emit a single report at the end.
+        on_event = _make_json_event_emitter()
+    else:
+        on_event = _make_event_emitter(console, verbose=verbose)
+
     exec_ = Executor(
         descriptor=parsed,
         plan=plan_obj,
         transport=transport,
         rollback_on_failure=rollback,
-        on_event=_make_event_emitter(console),
+        on_event=on_event,
     )
     import asyncio
 
     report = asyncio.run(exec_.run())
-    console.print()
-    console.print(_summary(report))
+    if json_output:
+        # Flush any pending structured log lines before the final
+        # report so callers see them in order.
+        sys.stderr.flush()
+        print(json.dumps(_report_to_dict(report), indent=2, sort_keys=True))
+    else:
+        console.print()
+        console.print(_summary(report))
     raise typer.Exit(code=report.exit_code)
 
 
@@ -180,25 +205,103 @@ def _apply_overrides_to_ctx(ov: dict[tuple[str, str], str]) -> dict[str, dict[st
     return out
 
 
-def _make_event_emitter(console_: Console):
+def _make_event_emitter(console_: Console, *, verbose: bool = False):
     from orchx.engine.models import StepAttempt
 
     def emit(node, attempt: StepAttempt) -> None:
         sym = {
-            "ok": "[green]✓[/green]",
-            "failed": "[red]✗[/red]",
+            "ok": "[green]\u2713[/green]",
+            "failed": "[red]\u2717[/red]",
             "skipped": "[yellow]~[/yellow]",
-            "rolling_back": "[magenta]⟲[/magenta]",
-            "rolled_back": "[green]✓ rb[/green]",
-            "rollback_failed": "[red]✗ rb[/red]",
+            "rolling_back": "[magenta]\u27f2[/magenta]",
+            "rolled_back": "[green]\u2713 rb[/green]",
+            "rollback_failed": "[red]\u2717 rb[/red]",
         }
         s = sym.get(attempt.status.value, f"[blue]{attempt.status.value}[/blue]")
         msg = f" {attempt.message}" if attempt.message else ""
         console_.print(
             f"  {s}  {node.step_id:24s}  try={attempt.attempt}  host={attempt.host}{msg}"
         )
+        # Verbose: also dump the event as one JSON line on stderr so
+        # operators can pipe to jq, log aggregators, etc.
+        if verbose:
+            line = {
+                "step_id": node.step_id,
+                "status": attempt.status.value,
+                "attempt": attempt.attempt,
+                "host": attempt.host,
+                "message": attempt.message,
+                "started_at": attempt.started_at,
+                "finished_at": attempt.finished_at,
+            }
+            print(json.dumps(line, sort_keys=True), file=sys.stderr)
 
     return emit
+
+
+def _make_json_event_emitter():
+    """Emit one JSON line per event to stderr.
+
+    The final report is emitted by the deploy() function after the
+    run completes. This emitter is the live-tap half of the
+    `--json` story: tail it with `orchx deploy ... --json 2>>run.ndjson`
+    and you have a structured event log of the run.
+    """
+
+    from orchx.engine.models import StepAttempt
+
+    def emit(node, attempt: StepAttempt) -> None:
+        line = {
+            "step_id": node.step_id,
+            "status": attempt.status.value,
+            "attempt": attempt.attempt,
+            "host": attempt.host,
+            "message": attempt.message,
+            "started_at": attempt.started_at,
+            "finished_at": attempt.finished_at,
+        }
+        print(json.dumps(line, sort_keys=True), file=sys.stderr)
+
+    return emit
+
+
+def _report_to_dict(report) -> dict[str, object]:
+    """Serialise a RunReport to a JSON-friendly dict.
+
+    Used by `orchx deploy --json`. We deliberately flatten the
+    StepAttempt objects into a list of dicts under ``attempts`` so
+    that downstream tooling (CI pipelines, log aggregators) can
+    reason about each attempt without chasing nested objects.
+    """
+    nodes: list[dict[str, object]] = []
+    for step_id, node in report.plan.nodes.items():
+        nodes.append(
+            {
+                "step_id": step_id,
+                "status": node.status.value,
+                "depends_on": list(node.depends_on),
+                "attempts": [
+                    {
+                        "step_id": a.step_id,
+                        "attempt": a.attempt,
+                        "status": a.status.value,
+                        "message": a.message,
+                        "host": a.host,
+                        "started_at": a.started_at,
+                        "finished_at": a.finished_at,
+                    }
+                    for a in node.attempts
+                ],
+            }
+        )
+    return {
+        "exit_code": report.exit_code,
+        "aborted": report.aborted,
+        "started_at": report.started_at,
+        "finished_at": report.finished_at,
+        "topo_order": list(report.plan.topo_order),
+        "nodes": nodes,
+    }
 
 
 def _summary(report) -> Panel:

@@ -470,3 +470,43 @@ async def test_concurrent_writes_under_load(tmp_path: Path) -> None:
             detail = client.get(f"/api/runs/{rid}").json()
             assert detail["state"] in ("ok", "failed", "aborted")
             assert len(detail["events"]) >= 2, f"run {rid} has only {len(detail['events'])} events"
+
+
+# ---------- OpenAPI ----------
+
+
+def test_openapi_schema_is_served(tmp_path: Path) -> None:
+    """The FastAPI app exposes /api/openapi.json, /api/docs,
+    and /api/redoc — useful for tooling that wants to consume
+    the API contract without scraping the dashboard.
+    """
+    app = _make_app(db_path=tmp_path / "openapi.sqlite")
+    with TestClient(app) as c:
+        spec = c.get("/api/openapi.json")
+        assert spec.status_code == 200
+        body = spec.json()
+        # Every public route is documented.
+        paths = set(body["paths"].keys())
+        for expected in (
+            "/healthz",
+            "/api/runs",
+            "/api/runs/{run_id}",
+            "/api/runs/{run_id}/events",
+            "/api/runs/{run_id}/cancel",
+        ):
+            assert expected in paths, f"missing {expected} in OpenAPI"
+        # The /api/runs list endpoint advertises the new query
+        # parameters we added in v0.2.0-alpha.
+        list_op = body["paths"]["/api/runs"]["get"]
+        param_names = {p["name"] for p in list_op.get("parameters", [])}
+        assert {"limit", "offset", "state_filter"} <= param_names
+
+        # /api/docs is the Swagger UI HTML.
+        docs = c.get("/api/docs")
+        assert docs.status_code == 200
+        assert "swagger" in docs.text.lower()
+
+        # /api/redoc is the ReDoc HTML.
+        redoc = c.get("/api/redoc")
+        assert redoc.status_code == 200
+        assert "redoc" in redoc.text.lower()

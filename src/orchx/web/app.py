@@ -66,7 +66,19 @@ def _make_app(db_path: Path | None = None) -> FastAPI:
                 t.cancel()
             await store.close()
 
-    app = FastAPI(title="OrchX", version="0.1.0a1", lifespan=lifespan)
+    app = FastAPI(
+        title="OrchX",
+        version="0.2.0",
+        lifespan=lifespan,
+        # OpenAPI is opt-in here because the dashboard embeds its
+        # own JSON API link in the header; we don't want a public
+        # /api/docs page in every deployment. Commercial users
+        # who want docs can override by passing a different
+        # `openapi_url` to the constructor.
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+        openapi_url="/api/openapi.json",
+    )
     _register_routes(app)
     return app
 
