@@ -26,3 +26,8 @@ state/local.sqlite
 state/logs/
 *.sqlite
 state/*.sqlite
+# SQLite WAL + SHM files (created when journal_mode=WAL is on)
+*.sqlite-wal
+*.sqlite-shm
+state/*.sqlite-wal
+state/*.sqlite-shm
