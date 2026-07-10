@@ -78,10 +78,35 @@ def _register_routes(app: FastAPI) -> None:
         return {"status": "ok"}
 
     @app.get("/api/runs")
-    async def list_runs() -> list[dict[str, object]]:
-        state: AppState = app.state.orchx
-        runs = await state.store.list_runs()
-        return [r.to_dict() for r in runs]
+    async def list_runs(
+        limit: int = 50,
+        offset: int = 0,
+        state_filter: str | None = None,
+    ) -> dict[str, object]:
+        # The query parameter is named `state_filter` to avoid
+        # collision with the AppState attribute on
+        # `app.state.orchx` — FastAPI binds both, but a
+        # parameter shadowing the well-known `app.state` name
+        # is confusing to read.
+        # Normalize inputs at the edge so the response echoes
+        # back what we actually used, not what the caller sent.
+        # A caller asking for limit=99999 or offset=-100 should
+        # see the normalized values in the response.
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        app_state: AppState = app.state.orchx
+        runs, total = await app_state.store.list_runs(
+            limit=limit,
+            offset=offset,
+            state=state_filter,
+        )
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "state": state_filter,
+            "runs": [r.to_dict() for r in runs],
+        }
 
     @app.post("/api/runs")
     async def create_run(req: RunRequest) -> dict[str, object]:

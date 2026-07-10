@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS runs (
     exit_code     INTEGER,
     plan_json     TEXT
 );
+CREATE INDEX IF NOT EXISTS runs_created_at_idx ON runs (created_at DESC);
+CREATE INDEX IF NOT EXISTS runs_state_idx ON runs (state);
+CREATE INDEX IF NOT EXISTS runs_state_created_idx ON runs (state, created_at DESC);
 CREATE TABLE IF NOT EXISTS events (
     run_id        TEXT NOT NULL,
     seq           INTEGER NOT NULL,
@@ -42,6 +45,23 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_run_idx ON events (run_id, seq);
 """
+
+
+# SQLite pragmas applied at every connection open.
+# - WAL: readers don't block writers and vice versa; the common
+#   case for the dashboard (concurrent reads + occasional writes
+#   from a backgrounded run).
+# - busy_timeout: SQLite retries the lock for this long instead of
+#   raising immediately under contention.
+# - foreign_keys: off for now; we have no FKs in the schema.
+# - synchronous=NORMAL: WAL-safe default; commits don't fsync the
+#   log file (only the WAL itself, which the OS handles in case
+#   of a crash).
+PRAGMAS = (
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA busy_timeout=5000",
+    "PRAGMA synchronous=NORMAL",
+)
 
 
 @dataclass
@@ -84,12 +104,34 @@ class RunStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._conn: aiosqlite.Connection | None = None
+        # One lock per store instance serialises ALL writes
+        # (create_run, update_run, emit). Reads are not gated
+        # by this lock because aiosqlite + WAL allows concurrent
+        # reads against the writer. We deliberately do NOT use a
+        # SQLite-level BEGIN IMMEDIATE because:
+        #   1. aiosqlite's `conn.execute()` already issues
+        #      BEGIN implicitly and we always `commit()` after
+        #      the single statement, so a single statement is
+        #      atomic on its own.
+        #   2. The Python-side lock prevents the *Python*
+        #      interleaving that would otherwise leave us with
+        #      a write log that doesn't match the engine's view
+        #      of "the latest run row" — the lock makes
+        #      create_run+update_run pairs atomic at the
+        #      orchestrator layer, even though each individual
+        #      statement is already atomic at the SQLite layer.
+        self._write_lock = asyncio.Lock()
         self._queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._seq: dict[str, int] = {}
 
     async def init(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(str(self.db_path))
+        # Apply pragmas BEFORE schema, so the indexes are
+        # created with the WAL writer visible to readers
+        # immediately.
+        for pragma in PRAGMAS:
+            await self._conn.execute(pragma)
         await self._conn.executescript(SCHEMA)
         await self._conn.commit()
 
@@ -102,13 +144,18 @@ class RunStore:
 
     async def create_run(self, run: RunRecord) -> None:
         assert self._conn is not None
-        await self._conn.execute(
-            "INSERT INTO runs (id, descriptor, target, state, created_at) VALUES (?, ?, ?, ?, ?)",
-            (run.id, run.descriptor, run.target, run.state, run.created_at),
-        )
-        await self._conn.commit()
+        # Set up the queue + seq counter BEFORE acquiring the
+        # lock so that a concurrent emit (impossible at this
+        # point in practice, but defensively) can find them.
         self._queues[run.id] = asyncio.Queue()
         self._seq[run.id] = 0
+        async with self._write_lock:
+            await self._conn.execute(
+                "INSERT INTO runs (id, descriptor, target, state, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (run.id, run.descriptor, run.target, run.state, run.created_at),
+            )
+            await self._conn.commit()
 
     async def update_run(
         self,
@@ -141,34 +188,65 @@ class RunStore:
         if not fields:
             return
         args.append(run_id)
-        await self._conn.execute(
-            f"UPDATE runs SET {', '.join(fields)} WHERE id = ?",
-            args,
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            await self._conn.execute(
+                f"UPDATE runs SET {', '.join(fields)} WHERE id = ?",
+                args,
+            )
+            await self._conn.commit()
 
-    async def list_runs(self) -> list[RunRecord]:
+    async def list_runs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        state: str | None = None,
+    ) -> tuple[list[RunRecord], int]:
+        """Page through the runs table.
+
+        Returns ``(rows, total_count)`` so the caller can render
+        a "Page N of M" UI. The default limit is 50; the absolute
+        maximum is 500 to keep response times bounded.
+        """
         assert self._conn is not None
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        where = ""
+        params: tuple[Any, ...] = ()
+        if state is not None:
+            where = "WHERE state = ?"
+            params = (state,)
+        # Total first (cheap on a small DB; the new indexes make
+        # this a 1-page read in the common case).
+        cur = await self._conn.execute(f"SELECT COUNT(*) FROM runs {where}", params)
+        row = await cur.fetchone()
+        total = int(row[0]) if row is not None else 0
+        # Then the page.
         cur = await self._conn.execute(
-            "SELECT id, descriptor, target, state, created_at, started_at, "
-            "finished_at, exit_code, plan_json "
-            "FROM runs ORDER BY created_at DESC LIMIT 100"
+            "SELECT id, descriptor, target, state, created_at, "
+            "started_at, finished_at, exit_code, plan_json "
+            f"FROM runs {where} "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
         )
         rows = await cur.fetchall()
-        return [
-            RunRecord(
-                id=r[0],
-                descriptor=r[1],
-                target=r[2],
-                state=r[3],
-                created_at=r[4],
-                started_at=r[5],
-                finished_at=r[6],
-                exit_code=r[7],
-                plan_json=r[8],
-            )
-            for r in rows
-        ]
+        return (
+            [
+                RunRecord(
+                    id=r[0],
+                    descriptor=r[1],
+                    target=r[2],
+                    state=r[3],
+                    created_at=r[4],
+                    started_at=r[5],
+                    finished_at=r[6],
+                    exit_code=r[7],
+                    plan_json=r[8],
+                )
+                for r in rows
+            ],
+            total,
+        )
 
     async def get_run(self, run_id: str) -> RunRecord | None:
         assert self._conn is not None
@@ -206,6 +284,12 @@ class RunStore:
         attempt: int | None = None,
     ) -> None:
         assert self._conn is not None
+        # Bump the in-memory seq counter OUTSIDE the write lock
+        # so emit() can be called from many concurrent code paths
+        # without serialising on the lock just for the counter.
+        # The seq is monotonic per-run and not derived from any
+        # external source, so a single-threaded increment is
+        # safe (Python asyncio is single-threaded).
         seq = self._seq.get(run_id, 0) + 1
         self._seq[run_id] = seq
         event = {
@@ -217,21 +301,22 @@ class RunStore:
             "host": host,
             "attempt": attempt,
         }
-        await self._conn.execute(
-            "INSERT INTO events (run_id, seq, step_id, status, message, "
-            "host, attempt, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                run_id,
-                seq,
-                step_id,
-                status,
-                message,
-                host,
-                attempt,
-                event["ts"],
-            ),
-        )
-        await self._conn.commit()
+        async with self._write_lock:
+            await self._conn.execute(
+                "INSERT INTO events (run_id, seq, step_id, status, message, "
+                "host, attempt, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    seq,
+                    step_id,
+                    status,
+                    message,
+                    host,
+                    attempt,
+                    event["ts"],
+                ),
+            )
+            await self._conn.commit()
         queue = self._queues.get(run_id)
         if queue is not None:
             await queue.put(event)

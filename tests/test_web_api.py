@@ -115,8 +115,8 @@ def test_list_runs_orders_newest_first(client: TestClient) -> None:
     )
     assert r1.status_code == 200 and r2.status_code == 200
     listing = client.get("/api/runs").json()
-    assert len(listing) >= 2
-    ids = [r["id"] for r in listing]
+    assert listing["total"] >= 2
+    ids = [r["id"] for r in listing["runs"]]
     assert ids.index(r2.json()["id"]) < ids.index(r1.json()["id"])
 
 
@@ -213,7 +213,7 @@ def test_run_persists_across_clients(tmp_path: Path) -> None:
     app2 = _make_app(db_path=db)
     with TestClient(app2) as c2:
         listing = c2.get("/api/runs").json()
-        ids = [row["id"] for row in listing]
+        ids = [row["id"] for row in listing["runs"]]
         assert run_id in ids, "run created by app1 not visible from app2"
         detail = c2.get(f"/api/runs/{run_id}").json()
         assert detail["state"] == "ok"
@@ -320,3 +320,148 @@ def _wait_terminal_on(
             break
         time.sleep(0.05)
     return final
+
+
+# ---------- pagination ----------
+
+
+def test_list_runs_pagination_default_limit_50(client: TestClient) -> None:
+    """The default page size is 50. We post only 3 runs, then
+    assert total=3 but the runs list is still bounded by the
+    caller-supplied limit. The exact contract here is just
+    that total == 3 and length(runs) == 3.
+    """
+    for _ in range(3):
+        client.post(
+            "/api/runs",
+            json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+        )
+    listing = client.get("/api/runs").json()
+    assert listing["total"] == 3
+    assert listing["limit"] == 50
+    assert listing["offset"] == 0
+    assert len(listing["runs"]) == 3
+
+
+def test_list_runs_pagination_limit_and_offset(client: TestClient) -> None:
+    """With limit=1 we get 1 row per page; offset=1 gives the
+    next-newest run. total stays at 2.
+    """
+    r1 = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    time.sleep(0.02)
+    r2 = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    page1 = client.get("/api/runs?limit=1&offset=0").json()
+    page2 = client.get("/api/runs?limit=1&offset=1").json()
+    assert page1["total"] == 2
+    assert page1["limit"] == 1
+    assert page1["offset"] == 0
+    assert len(page1["runs"]) == 1
+    assert page2["offset"] == 1
+    assert len(page2["runs"]) == 1
+    # Newest first.
+    assert page1["runs"][0]["id"] == r2.json()["id"]
+    assert page2["runs"][0]["id"] == r1.json()["id"]
+
+
+def test_list_runs_filter_by_state(client: TestClient) -> None:
+    """state_filter=ok returns only ok runs. state_filter=pending
+    returns only pending runs (which is the initial state of a
+    newly-posted run that hasn't started yet).
+    """
+    # Wait for the first batch to finish so we have an "ok" run.
+    first = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    run_id = first.json()["id"]
+    _wait_terminal(client, run_id, deadline_s=5)
+    ok_listing = client.get("/api/runs?state_filter=ok").json()
+    assert ok_listing["total"] >= 1
+    assert all(r["state"] == "ok" for r in ok_listing["runs"])
+    # A second run, freshly posted, is pending for an instant.
+    second = client.post(
+        "/api/runs",
+        json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+    )
+    pending_listing = client.get("/api/runs?state_filter=pending").json()
+    # The mock transport finishes runs in ~25 ms, so by the time
+    # we GET, the second run is probably already ok. The contract
+    # we DO assert is that the filtered list contains ONLY
+    # pending runs (not running / ok / etc).
+    assert all(r["state"] == "pending" for r in pending_listing["runs"])
+    second_id = second.json()["id"]
+    # Cleanup: let the second run finish so the next test sees
+    # a clean DB.
+    _wait_terminal(client, second_id, deadline_s=5)
+
+
+def test_list_runs_rejects_oversized_limit(client: TestClient) -> None:
+    """limit > 500 is silently capped to 500 to keep response
+    times bounded on huge tables.
+    """
+    listing = client.get("/api/runs?limit=99999").json()
+    assert listing["limit"] == 500
+
+
+def test_list_runs_negative_offset_normalized(client: TestClient) -> None:
+    """A negative offset is treated as 0 — we never want a
+    caller to accidentally skip nothing AND confuse pagination.
+    """
+    listing = client.get("/api/runs?offset=-100").json()
+    assert listing["offset"] == 0
+
+
+# ---------- concurrent write safety ----------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writes_under_load(tmp_path: Path) -> None:
+    """Stress the SQLite write path. We open one app, post N
+    runs concurrently, and assert:
+      * No exception escapes the create_run path.
+      * The total row count matches what we posted.
+      * The event log for each run has at least the synthetic
+        'run started' event, plus the terminal-state event.
+    """
+    import asyncio as _asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from orchx.web.app import _make_app
+
+    db = tmp_path / "concurrent.sqlite"
+    app = _make_app(db_path=db)
+
+    async def post(client, i):
+        return client.post(
+            "/api/runs",
+            json={"descriptor": str(DESCRIPTOR), "target": "mock://local"},
+        )
+
+    with TestClient(app) as client:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_asyncio.run, post(client, i)) for i in range(8)]
+            responses = [f.result() for f in futures]
+        assert all(r.status_code == 200 for r in responses)
+        ids = [r.json()["id"] for r in responses]
+        assert len(set(ids)) == 8, "all ids must be unique"
+
+        # Let all runs finish.
+        for rid in ids:
+            _wait_terminal(client, rid, deadline_s=5)
+
+        listing = client.get("/api/runs?limit=500").json()
+        assert listing["total"] == 8
+
+        # Each run has at least one event (the synthetic "pending
+        # run started" emitted in _run_in_background) plus a
+        # terminal-state event.
+        for rid in ids:
+            detail = client.get(f"/api/runs/{rid}").json()
+            assert detail["state"] in ("ok", "failed", "aborted")
+            assert len(detail["events"]) >= 2, f"run {rid} has only {len(detail['events'])} events"
