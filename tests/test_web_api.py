@@ -510,3 +510,58 @@ def test_openapi_schema_is_served(tmp_path: Path) -> None:
         redoc = c.get("/api/redoc")
         assert redoc.status_code == 200
         assert "redoc" in redoc.text.lower()
+
+
+# ---------- dashboard login modal ----------
+
+
+def test_dashboard_login_modal_elements_render(tmp_path: Path) -> None:
+    """The login modal is hidden in mode=none but the
+    elements are present so the JS can toggle them on
+    when the server later reports mode=basic.
+    """
+    app = _make_app(db_path=tmp_path / "login_elements.sqlite")
+    with TestClient(app) as c:
+        r = c.get("/")
+        assert r.status_code == 200
+        # The modal container is in the DOM (display:none
+        # at load time, but the elements must exist).
+        assert 'id="login-modal"' in r.text
+        assert 'id="login-submit"' in r.text
+        assert 'id="login-user"' in r.text
+        assert 'id="login-pass"' in r.text
+        assert 'id="login-token"' in r.text
+        # The "Sign out" link is hidden in mode=none.
+        assert 'id="signout"' in r.text
+        # The fetch wrapper must be present so every API
+        # call carries the credential automatically.
+        assert "applyAuth" in r.text
+        assert "buildWsUrl" in r.text
+
+
+def test_dashboard_signout_link_renders_in_authenticated_mode(
+    tmp_path: Path,
+) -> None:
+    """In mode=basic the dashboard shows a "Sign out" link so
+    the operator can clear the localStorage credential.
+    """
+    import hashlib
+
+    from orchx.web.auth import AuthConfig
+
+    cfg = AuthConfig(
+        mode="basic",
+        basic_user="admin",
+        basic_password_hash=hashlib.sha256(b"s3cr3t").hexdigest(),
+    )
+    app = _make_app(
+        db_path=tmp_path / "signout.sqlite",
+        auth_config=cfg,
+    )
+    with TestClient(app) as c:
+        r = c.get("/")
+        # The link is in the DOM; the JS shows it when a
+        # credential is in localStorage. We just assert
+        # the markup is present.
+        assert 'id="signout"' in r.text
+        assert "logout" in r.text

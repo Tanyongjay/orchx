@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,18 @@ def _api_key_config(key: str = "my-token") -> AuthConfig:
         mode="api_key",
         api_key_hash=hashlib.sha256(key.encode("utf-8")).hexdigest(),
     )
+
+
+@pytest.fixture(autouse=True)
+def clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scrub ORCHX_AUTH_* from the host shell so each test
+    sees a deterministic env (the AuthConfig comes from
+    the ``_basic_config`` / ``_api_key_config`` helpers,
+    not from the process environment).
+    """
+    for k in list(os.environ):
+        if k.startswith("ORCHX_AUTH_"):
+            monkeypatch.delenv(k, raising=False)
 
 
 def _basic_header(user: str, password: str) -> dict[str, str]:

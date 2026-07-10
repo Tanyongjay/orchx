@@ -134,7 +134,16 @@ def _register_routes(app: FastAPI) -> None:
         # whether a login screen is needed).
         if not request.url.path.startswith("/api/"):
             return await call_next(request)
-        if request.url.path == "/api/auth":
+        # /api/auth is open so the dashboard can decide
+        # whether to show a login screen. The OpenAPI
+        # routes are open so external tooling can introspect
+        # the API contract.
+        if request.url.path in {
+            "/api/auth",
+            "/api/openapi.json",
+            "/api/docs",
+            "/api/redoc",
+        }:
             return await call_next(request)
         config = request.app.state.orchx.auth_config
         if config.mode == "none":
@@ -560,7 +569,7 @@ _INDEX_HTML = """
 <header>
   <h1>OrchX control plane</h1>
   <span class="tagline">Multi-system deploy orchestrator</span>
-  <span class="tagline" style="margin-left:auto"><a href="/api/runs" style="color:#58a6ff">JSON API</a> · <a href="/healthz" style="color:#58a6ff">healthz</a></span>
+  <span class="tagline" style="margin-left:auto"><a href="/api/runs" style="color:#58a6ff">JSON API</a> · <a href="/healthz" style="color:#58a6ff">healthz</a> · <a href="#" id="signout" style="color:#58a6ff;display:none" onclick="event.preventDefault(); logout()">Sign out</a></span>
 </header>
 <main>
   <section class="panel" id="new-run">
@@ -603,17 +612,189 @@ _INDEX_HTML = """
     <h2 id="detail-title">Select a run</h2>
     <div id="detail-body" class="empty">No run selected.</div>
   </section>
+  <div id="login-modal" class="modal" style="display:none">
+    <div class="modal-body">
+      <h2>Sign in to OrchX</h2>
+      <p id="login-help" style="color:#8b949e;font-size:13px"></p>
+      <label id="login-user-label" for="login-user" style="font-size:12px;color:#8b949e">Username</label>
+      <input id="login-user" type="text" autocomplete="username" style="display:block;width:100%;margin:4px 0 10px;padding:6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px">
+      <label id="login-pass-label" for="login-pass" style="font-size:12px;color:#8b949e">Password</label>
+      <input id="login-pass" type="password" autocomplete="current-password" style="display:block;width:100%;margin:4px 0 10px;padding:6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px">
+      <label id="login-token-label" for="login-token" style="font-size:12px;color:#8b949e;display:none">API token</label>
+      <input id="login-token" type="password" autocomplete="off" style="display:none;width:100%;margin:4px 0 10px;padding:6px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px">
+      <div id="login-error" style="color:#f85149;font-size:12px;min-height:18px;margin-bottom:6px"></div>
+      <div class="row" style="justify-content:flex-end">
+        <button id="login-submit">Sign in</button>
+      </div>
+    </div>
+  </div>
 </main>
+
+<style>
+.modal {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.modal-body {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 24px;
+  width: 360px;
+  max-width: 90vw;
+}
+.modal-body h2 { margin-top: 0; }
+</style>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let selectedRunId = null;
 let ws = null;
 
+// ---- auth state ----
+// We store the credential in localStorage keyed by
+// the current origin so a refresh keeps the user signed
+// in. The credential is sent on every fetch() via
+// applyAuth() below; it is never sent to a third party
+// because /api/auth is a same-origin request.
+const STORAGE_KEY = "orchx.cred";
+let authMode = "none";
+
+function getCred() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "null"); }
+  catch { return null; }
+}
+function setCred(c) {
+  if (c) localStorage.setItem(STORAGE_KEY, JSON.stringify(c));
+  else localStorage.removeItem(STORAGE_KEY);
+}
+function applyAuth(headers) {
+  const c = getCred();
+  if (!c) return headers;
+  if (c.kind === "basic") {
+    headers["Authorization"] = "Basic " + btoa(c.user + ":" + c.pass);
+  } else if (c.kind === "api_key") {
+    headers["Authorization"] = "Bearer " + c.token;
+  }
+  return headers;
+}
+// Wrap fetch so every API call (including the live
+// stream's URL params) carries the credential. The
+// WebSocket code path uses buildWsUrl() below.
+const _origFetch = window.fetch;
+window.fetch = function (url, init) {
+  init = init || {};
+  init.headers = init.headers || {};
+  applyAuth(init.headers);
+  return _origFetch.call(this, url, init);
+};
+
+function buildWsUrl(runId) {
+  const c = getCred();
+  let url = `/api/runs/${runId}/stream`;
+  if (c && c.kind === "api_key") {
+    url += "?token=" + encodeURIComponent(c.token);
+  } else if (c && c.kind === "basic") {
+    // WebSocket can't carry Authorization, so base64 the
+    // user:pass into ?basic=... The server reads and
+    // validates it the same way it would for an HTTP
+    // Basic header.
+    url += "?basic=" + encodeURIComponent(btoa(c.user + ":" + c.pass));
+  }
+  return url;
+}
+
+function showLoginModal(mode) {
+  const m = $("login-modal");
+  m.style.display = "flex";
+  $("login-error").textContent = "";
+  if (mode === "basic") {
+    $("login-user-label").style.display = "";
+    $("login-user").style.display = "block";
+    $("login-pass-label").style.display = "";
+    $("login-pass").style.display = "block";
+    $("login-token-label").style.display = "none";
+    $("login-token").style.display = "none";
+    $("login-help").textContent =
+      "Enter the username and password configured via " +
+      "ORCHX_AUTH_BASIC_USER and ORCHX_AUTH_BASIC_PASSWORD.";
+  } else {
+    $("login-user-label").style.display = "none";
+    $("login-user").style.display = "none";
+    $("login-pass-label").style.display = "none";
+    $("login-pass").style.display = "none";
+    $("login-token-label").style.display = "";
+    $("login-token").style.display = "block";
+    $("login-help").textContent =
+      "Enter the API token configured via ORCHX_AUTH_API_KEY.";
+  }
+}
+function hideLoginModal() {
+  $("login-modal").style.display = "none";
+}
+
+async function submitLogin() {
+  const status = await (await fetch("/api/auth")).json();
+  const c = status.mode === "basic"
+    ? { kind: "basic", user: $("login-user").value, pass: $("login-pass").value }
+    : { kind: "api_key", token: $("login-token").value };
+  setCred(c);
+  // Verify the credential works. If the server returns
+  // 401, surface the error and stay on the modal.
+  const probe = await fetch("/api/runs?limit=1");
+  if (probe.status === 401) {
+    $("login-error").textContent =
+      "Sign-in failed: the server rejected the credential.";
+    setCred(null);
+    return;
+  }
+  hideLoginModal();
+  // Surface "Sign out" once a credential is stored. The
+  // link is hidden in mode=none and shown whenever a
+  // credential exists.
+  if (authMode !== "none") {
+    $("signout").style.display = "";
+  }
+  await refreshRuns();
+}
+
+async function logout() {
+  setCred(null);
+  location.reload();
+}
+
 async function init() {
+  // Probe /api/auth. If the response says credentials are
+  // required but the user has none in localStorage, show
+  // the login modal. We do this BEFORE the first
+  // refreshRuns() so the dashboard never flashes a 401
+  // to the operator.
+  const status = await (await fetch("/api/auth")).json();
+  authMode = status.mode;
+  if (status.requires_credentials && !getCred()) {
+    showLoginModal(status.mode);
+  }
+  // Wire the login-submit button. We do this here so the
+  // element is in the DOM by the time we attach.
+  $("login-submit").onclick = submitLogin;
+  // Allow Enter in the password field to submit.
+  ["login-user", "login-pass", "login-token"].forEach((id) => {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submitLogin();
+    });
+  });
   await loadDescriptorOptions();
   await refreshRuns();
   setInterval(refreshRuns, 2000);
+  // The "Sign out" link is hidden when the server is in
+  // mode=none (no credentials to clear) or when the user
+  // isn't signed in. It surfaces the moment a credential
+  // is stored in localStorage.
+  if (authMode !== "none" && getCred()) {
+    $("signout").style.display = "";
+  }
 }
 
 async function loadDescriptorOptions() {
@@ -772,7 +953,7 @@ async function selectRun(runId) {
   // Open a WebSocket for live updates.
   if (ws) { try { ws.close(); } catch(e){} }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${proto}//${location.host}/api/runs/${runId}/stream`);
+  ws = new WebSocket(`${proto}//${location.host}${buildWsUrl(runId)}`);
   ws.onmessage = (e) => {
     const ev = JSON.parse(e.data);
     // De-dup by seq: server replays history then streams live; the
