@@ -24,16 +24,13 @@ The script:
 This script is intended for CI smoke tests and developer
 machines. In production the operator uses a real key pair.
 """
+
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
-import time
-from pathlib import Path
 
 import paramiko
-
 
 REPO_URL = "https://github.com/Tanyongjay/orchx.git"
 WORK_DIR_REMOTE = os.environ.get("WORK_DIR_REMOTE", "orchx")
