@@ -1,0 +1,50 @@
+# Minimal descriptor for end-to-end real-SSH verification.
+#
+# This is the smallest descriptor that exercises the
+# SSH transport against a real Linux host. It only uses
+# `command` and `check` step kinds; no systemd, no
+# PostgreSQL, no venv. A successful run proves the
+# orchx engine, the SSH transport, and the descriptor
+# loader are all wired together correctly.
+#
+# Run with:
+#   orchx deploy descriptors/sample_ssh_smoke.yaml \
+#       --target ssh://user@host:22
+#       [--no-rollback]
+#
+# Use this descriptor as a first-run smoke test
+# before deploying a real workload.
+system:
+  name: Real-SSH smoke probe
+  code: ssh_smoke
+  version: "0.1.0"
+
+install_root: /tmp/ssh_smoke
+
+variables: {}
+
+topology:
+  roles:
+    - name: control
+      count: 1
+
+steps:
+  - id: whoami
+    type: command
+    on_host: control
+    cmd: [id]
+  - id: hostname
+    type: command
+    on_host: control
+    cmd: [hostname]
+  - id: uname
+    type: command
+    on_host: control
+    cmd: [uname, -r]
+  - id: disk
+    type: command
+    on_host: control
+    cmd:
+      - /bin/sh
+      - -c
+      - "df -h / | tail -1"

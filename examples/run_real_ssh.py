@@ -78,12 +78,23 @@ def main() -> int:
     print("SSH connected.")
 
     # 1. toolchain probe
+    # git + python3 are required; pip3 may be absent on
+    # Ubuntu 24.04+ where the python3-pip package is
+    # opt-in. uv is preferred and is installed via the
+    # standalone installer (curl -LsSf https://astral.sh/uv/...)
+    # if it's not already on PATH.
     out = _ssh_exec(
         client,
-        "for b in git python3 pip3; do command -v $b >/dev/null 2>&1 || "
-        "{ echo missing: $b; exit 1; }; done; "
-        "command -v uv >/dev/null || pip3 install --user uv; "
+        "set -e; "
+        "for b in git python3 curl; do "
+        "  command -v $b >/dev/null 2>&1 || { echo missing: $b; exit 1; }; "
+        "done; "
+        "if ! command -v uv >/dev/null 2>&1; then "
+        "  echo installing-uv; "
+        "  curl -LsSf https://astral.sh/uv/install.sh | sh; "
+        "fi; "
         "export PATH=$HOME/.local/bin:$PATH; "
+        "command -v uv >/dev/null || { echo uv-still-missing; exit 1; }; "
         "echo toolchain-ok",
     )
     assert "toolchain-ok" in out, out
@@ -100,11 +111,20 @@ def main() -> int:
     )
 
     # 3. install
+    # Install into a project-local virtualenv and put
+    # ``orchx`` on PATH via the venv's bin dir. We avoid
+    # ``uv pip install --system`` because Ubuntu 24.04+
+    # marks the system Python as ``EXTERNALLY-MANAGED`` and
+    # ``uv`` refuses to install into it. The venv gives
+    # us a clean, isolated install.
     _ssh_exec(
         client,
-        f"set -e; export PATH=$HOME/.local/bin:$PATH; cd {WORK_DIR_REMOTE}; "
-        f"uv pip install --system -e .[real,dev] 2>/dev/null || "
-        f"pip3 install --user -e .[real,dev]; "
+        f"set -e; export PATH=$HOME/.local/bin:$PATH; "
+        f"cd $HOME; "
+        f"if [ ! -d .orchx-venv ]; then uv venv .orchx-venv; fi; "
+        f"source .orchx-venv/bin/activate; "
+        f"cd {WORK_DIR_REMOTE}; "
+        f"uv pip install -e .[real,dev]; "
         f"orchx --help >/dev/null && echo orchx-ok",
     )
 
@@ -114,13 +134,15 @@ def main() -> int:
     print("=" * 60)
     _ssh_exec(
         client,
-        f"set -e; export PATH=$HOME/.local/bin:$PATH; cd {WORK_DIR_REMOTE}; "
+        f"set -e; export PATH=$HOME/.local/bin:$PATH; "
+        f"source $HOME/.orchx-venv/bin/activate; "
+        f"cd {WORK_DIR_REMOTE}; "
         f"export ORCHX_SECRET_db_host=db.internal; "
         f"export ORCHX_SECRET_db_name=hr_svc; "
         f"export ORCHX_SECRET_db_user=hr_ro; "
         f"export ORCHX_SECRET_db_password=demo; "
         f"unset ORCHX_SECRET_db_port; "
-        f"orchx plan descriptors/sample_oauth_service.yaml "
+        f"orchx plan descriptors/sample_settle_eod.yaml "
         f"--target ssh://{user}@127.0.0.1:22",
     )
 
@@ -130,13 +152,15 @@ def main() -> int:
     print("=" * 60)
     _ssh_exec(
         client,
-        f"set -e; export PATH=$HOME/.local/bin:$PATH; cd {WORK_DIR_REMOTE}; "
+        f"set -e; export PATH=$HOME/.local/bin:$PATH; "
+        f"source $HOME/.orchx-venv/bin/activate; "
+        f"cd {WORK_DIR_REMOTE}; "
         f"export ORCHX_SECRET_db_host=db.internal; "
         f"export ORCHX_SECRET_db_name=hr_svc; "
         f"export ORCHX_SECRET_db_user=hr_ro; "
         f"export ORCHX_SECRET_db_password=demo; "
         f"unset ORCHX_SECRET_db_port; "
-        f"orchx deploy descriptors/sample_oauth_service.yaml "
+        f"orchx deploy descriptors/sample_settle_eod.yaml "
         f"--target ssh://{user}@127.0.0.1:22 --no-rollback",
     )
 
