@@ -72,6 +72,23 @@ def render_template(value: Any, ctx: dict[str, Any]) -> Any:
             # and even then it never persists the resolved value
             # into the plan model.
             if path == "secret" or path.startswith("secret."):
+                # Secrets are intentionally NOT resolved at
+                # descriptor-load time — see the security
+                # note in render_template's docstring and
+                # tests/test_secret_template.py for the
+                # lock-down test that proves no value
+                # ever lands on disk from this path.
+                # However, callers that need to know which
+                # secret names were referenced (notably
+                # ``orchx doctor`` for preflight checks)
+                # can install a side channel by passing a
+                # ``ctx["_secret_probe"]`` set. The probe
+                # only sees the names, never the values.
+                probe = ctx.get("_secret_probe")
+                if probe is not None and hasattr(probe, "add"):
+                    name = path[len("secret.") :] if path != "secret" else ""
+                    if name:
+                        probe.add(name)
                 return m.group(0)  # leave the {{ ... }} block untouched
             cur: Any = ctx
             try:

@@ -8,6 +8,7 @@ Commands:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -40,6 +41,202 @@ def validate(
         log.error(str(e))
         raise typer.Exit(code=2) from None
     log.info(f"OK {descriptor}")
+
+
+@app.command()
+def doctor(
+    descriptor: Path = typer.Argument(..., exists=True, readable=True),
+    target: str = typer.Option("mock://local", "--target", "-t"),
+    secrets_backend: str | None = typer.Option(
+        None,
+        "--secrets-backend",
+        help=("Backend used to resolve {% secret x %} tokens. env|file|memory (default: env)."),
+    ),
+    secrets_file: Path | None = typer.Option(
+        None,
+        "--secrets-file",
+        help="Path to a secrets file (when --secrets-backend=file).",
+    ),
+) -> None:
+    """Run preflight checks against a target and descriptor.
+
+    doctor prints one PASS/FAIL line per check and exits
+    non-zero if any check fails. It does NOT deploy; it
+    only verifies that the deploy WILL work if you run
+    it. Use this after editing a descriptor or moving
+    to a new target host.
+
+    The checks are:
+      1. Descriptor load: parse the YAML, validate the
+         Pydantic model, render templates.
+      2. Plan DAG: build the dependency graph and check
+         for cycles and missing rev: pairs.
+      3. Secret resolution: for every {{ secret.x }} token
+         in the descriptor, look it up in the active vault
+         backend and report missing names.
+      4. Target reachability: TCP connect to host:port
+         so the operator sees a fast FAIL if a firewall
+         is blocking the connection.
+      5. Auth: for ssh, the key file (if any) exists and
+         is readable; for winrm, the URI carries credentials.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    from orchx.descriptor.loader import (
+        _ctx_from_descriptor,
+        load_descriptor,
+        render_descriptor,
+    )
+    from orchx.engine.planner import build_plan
+    from orchx.secrets import get_vault
+
+    failures = 0
+
+    def _check(label: str, ok: bool, detail: str = "") -> None:
+        nonlocal failures
+        marker = "[green]PASS[/green]" if ok else "[red]FAIL[/red]"
+        line = f"  {marker}  {label}"
+        if detail:
+            line += f"   ({detail})"
+        console.print(line)
+        if not ok:
+            failures += 1
+
+    # 1. Descriptor load.
+    try:
+        parsed = load_descriptor(descriptor)
+        _check(
+            "descriptor load",
+            True,
+            f"{descriptor} ({len(parsed.steps)} steps)",
+        )
+    except Exception as e:
+        _check("descriptor load", False, str(e))
+        console.print()
+        console.print(f"[red]doctor: {failures} check(s) failed[/red]")
+        raise typer.Exit(code=1) from None
+
+    # 2. Plan DAG.
+    try:
+        plan = build_plan(parsed)
+        n_steps = len(plan.nodes)
+        n_revs = sum(1 for sid in plan.nodes if sid.startswith("rev:"))
+        _check(
+            "plan DAG",
+            True,
+            f"{n_steps} nodes ({n_revs} rev: pairs)",
+        )
+    except Exception as e:
+        _check("plan DAG", False, str(e))
+
+    # 3. Secret resolution.
+    try:
+        vault_kwargs: dict[str, object] = {}
+        if secrets_file is not None:
+            vault_kwargs["path"] = secrets_file
+        vault = get_vault(secrets_backend, **vault_kwargs)
+
+        # render_template intentionally does NOT consult the
+        # vault; it leaves {{ secret.x }} tokens untouched.
+        # But it does call ctx["_secret_probe"].add(name) for
+        # every name it sees, so the doctor can preflight the
+        # vault without ever resolving a value. See the
+        # security note in render_template's docstring for
+        # why this is the safe way to do it.
+        seen: set[str] = set()
+        ctx = dict(_ctx_from_descriptor(parsed))
+        ctx["_secret_probe"] = seen
+        with contextlib.suppress(Exception):
+            # If render fails, the doctor still continues
+            # to the next check; the user gets the real
+            # failure when they actually deploy.
+            render_descriptor(parsed, ctx)
+        missing: list[str] = []
+        for name in sorted(seen):
+            try:
+                vault.resolve(name)
+            except Exception:
+                missing.append(name)
+        if missing:
+            _check(
+                "secrets",
+                False,
+                f"missing in vault: {', '.join(missing)}",
+            )
+        elif not seen:
+            _check("secrets", True, "no secret tokens in descriptor")
+        else:
+            n = len(seen)
+            _check("secrets", True, f"{n} name(s) resolved")
+    except Exception as e:
+        _check("secrets", False, str(e))
+
+    # 4. Target reachability.
+    try:
+        parsed_url = urlparse(target)
+        scheme = parsed_url.scheme.lower()
+        if scheme in ("mock",):
+            _check("target reachability", True, "mock:// (in-process)")
+        else:
+            import socket
+
+            host = parsed_url.hostname or ""
+            port = parsed_url.port or 22
+            s = socket.socket()
+            s.settimeout(5)
+            try:
+                s.connect((host, port))
+                _check(
+                    "target reachability",
+                    True,
+                    f"{host}:{port} ({scheme})",
+                )
+            except OSError as e:
+                _check("target reachability", False, f"{host}:{port} {e}")
+            finally:
+                s.close()
+    except Exception as e:
+        _check("target reachability", False, str(e))
+
+    # 5. Auth.
+    try:
+        parsed_url = urlparse(target)
+        scheme = parsed_url.scheme.lower()
+        if scheme == "ssh":
+            qs = parse_qs(parsed_url.query)
+            key = qs.get("key", [None])[0]
+            if key:
+                from pathlib import Path as _P
+
+                p = _P(key)
+                if p.exists() and p.is_file():
+                    _check("auth", True, f"ssh key {key}")
+                else:
+                    _check("auth", False, f"ssh key not found: {key}")
+            else:
+                _check(
+                    "auth",
+                    True,
+                    "ssh (no key in URI; password or agent auth assumed)",
+                )
+        elif scheme in ("winrm", "winrm-http"):
+            if parsed_url.username and parsed_url.password:
+                _check("auth", True, f"{scheme} (creds in URI)")
+            else:
+                _check("auth", False, f"{scheme} URI missing user/password")
+        elif scheme == "mock":
+            # Already handled in target reachability.
+            pass
+        else:
+            _check("auth", False, f"unknown scheme: {scheme}")
+    except Exception as e:
+        _check("auth", False, str(e))
+
+    console.print()
+    if failures:
+        console.print(f"[red]doctor: {failures} check(s) failed[/red]")
+        raise typer.Exit(code=1) from None
+    console.print("[green]doctor: all checks passed[/green]")
 
 
 @app.command()

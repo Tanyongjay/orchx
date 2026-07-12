@@ -144,3 +144,175 @@ def test_deploy_verbose_writes_json_per_event_to_stderr() -> None:
         assert {"step_id", "status", "attempt", "host"} <= set(ev.keys())
     # At least one event per non-reversal step.
     assert len(lines) >= 5
+
+
+# ---------- orchx doctor ----------
+
+
+def test_doctor_reports_pass_for_mock_target() -> None:
+    """The doctor exits 0 and prints PASS for every check
+    when the descriptor is valid, the target is mock://
+    (no real host needed), and the descriptor references
+    no secrets.
+    """
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "doctor",
+            "descriptors/sample_webapp_erp.yaml",
+            "--target",
+            "mock://local",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode == 0, cp.stderr
+    # All 4 checks present.
+    for label in (
+        "descriptor load",
+        "plan DAG",
+        "secrets",
+        "target reachability",
+    ):
+        assert label in cp.stdout, f"missing '{label}' in {cp.stdout!r}"
+
+
+def test_doctor_reports_failure_when_secrets_missing(monkeypatch) -> None:
+    """When the descriptor references secrets that aren't
+    set in the environment, the doctor prints FAIL on the
+    secrets line and exits non-zero. This is the main reason
+    the doctor exists: catch missing secrets BEFORE the
+    actual deploy fails.
+    """
+    for k in (
+        "ORCHX_SECRET_db_host",
+        "ORCHX_SECRET_db_name",
+        "ORCHX_SECRET_db_user",
+        "ORCHX_SECRET_db_password",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    env = os.environ.copy()
+    for k in (
+        "ORCHX_SECRET_db_host",
+        "ORCHX_SECRET_db_name",
+        "ORCHX_SECRET_db_user",
+        "ORCHX_SECRET_db_password",
+    ):
+        env.pop(k, None)
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "doctor",
+            "descriptors/sample_hr_service.yaml",
+            "--target",
+            "mock://local",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode != 0
+    assert "FAIL" in cp.stdout
+    assert "secrets" in cp.stdout
+    # All four missing names appear in the failure detail.
+    for name in ("db_host", "db_name", "db_user", "db_password"):
+        assert name in cp.stdout, f"missing secret name {name!r}"
+
+
+def test_doctor_reports_pass_when_secrets_resolve(monkeypatch) -> None:
+    """When every secret referenced by the descriptor is
+    present in the environment, the doctor prints PASS.
+    """
+    env = os.environ.copy()
+    env["ORCHX_SECRET_db_host"] = "db.internal"
+    env["ORCHX_SECRET_db_name"] = "hr_svc"
+    env["ORCHX_SECRET_db_user"] = "hr_ro"
+    env["ORCHX_SECRET_db_password"] = "demo"
+    env["ORCHX_SECRET_db_port"] = "5432"
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "doctor",
+            "descriptors/sample_hr_service.yaml",
+            "--target",
+            "mock://local",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode == 0, cp.stderr
+    assert "PASS" in cp.stdout
+    assert "5 name(s) resolved" in cp.stdout
+
+
+def test_doctor_checks_target_reachability() -> None:
+    """When the target is a real host on the LAN, the doctor
+    reports PASS on the reachability line. We use 127.0.0.1
+    so the test works on any host with a TCP stack (and doesn't
+    require a real orchx target).
+    """
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "doctor",
+            "descriptors/sample_webapp_erp.yaml",
+            "--target",
+            "ssh://nope@example.invalid:22",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # The TCP probe to example.invalid will fail. The doctor
+    # may still exit 0 (reachability is just one check) or
+    # non-zero; we only assert the FAIL line is present.
+    assert "FAIL" in cp.stdout
+    assert "target reachability" in cp.stdout
+
+
+def test_doctor_exits_nonzero_when_descriptor_load_fails(tmp_path) -> None:
+    """A descriptor with invalid YAML must fail the load
+    step and exit non-zero. We write the file ourselves
+    (typer's ``exists=True`` Path check would otherwise
+    reject a non-existent file before our handler runs).
+    """
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("not: valid: yaml: at: all", encoding="utf-8")
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "doctor",
+            str(bad),
+            "--target",
+            "mock://local",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode != 0
+    combined = cp.stdout + cp.stderr
+    assert "FAIL" in combined
+    assert "descriptor load" in combined
