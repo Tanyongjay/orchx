@@ -3,7 +3,7 @@ from pathlib import Path
 import time
 from playwright.sync_api import sync_playwright
 
-WEB = "http://127.0.0.1:8765"
+WEB = "http://127.0.0.1:8000"
 SHOTS = Path("D:/123/orchx/docs/screenshots")
 SHOTS.mkdir(parents=True, exist_ok=True)
 

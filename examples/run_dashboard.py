@@ -1,0 +1,50 @@
+"""Run the OrchX control plane locally on port 8000.
+
+Use this for a quick visual smoke test of the dashboard.
+The script:
+  - clears ORCHX_AUTH_* and ORCHX_SECRET_db_* from the env
+    so the doctor / auth tests in the suite don't pollute
+    this session
+  - starts uvicorn on 127.0.0.1:8000
+  - uses state/demo.sqlite as the on-disk run log (regenerated
+    on every restart)
+  - logs to stdout at INFO level
+
+Stop with Ctrl-C. The SQLite file is left in state/ and will
+be re-used on next start.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import uvicorn
+
+# Clear potential leakage from prior test sessions.
+for k in (
+    "ORCHX_AUTH_MODE",
+    "ORCHX_AUTH_BASIC_USER",
+    "ORCHX_AUTH_BASIC_PASSWORD",
+    "ORCHX_AUTH_API_KEY",
+    "ORCHX_SECRET_db_host",
+    "ORCHX_SECRET_db_name",
+    "ORCHX_SECRET_db_user",
+    "ORCHX_SECRET_db_PASSWORD",
+    "ORCHX_SECRET_db_port",
+):
+    os.environ.pop(k, None)
+
+from orchx.web.app import _make_app  # noqa: E402
+
+db = Path("state/demo.sqlite")
+db.parent.mkdir(parents=True, exist_ok=True)
+app = _make_app(db_path=db)
+
+print("OrchX dashboard ready:")
+print("  http://127.0.0.1:8000/        (this Windows host)")
+print("  http://192.168.10.190:8000/  (LAN)")
+print(f"  mode: {os.environ.get('ORCHX_AUTH_MODE') or 'none (open)'}")
+print(f"  SQLite: {db.resolve()}")
+print()
+
+uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
