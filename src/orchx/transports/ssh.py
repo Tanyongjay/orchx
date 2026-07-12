@@ -115,6 +115,13 @@ class SSHTransport(Transport):
         self.creds = _parse_ssh_uri(uri)
         self._conn: Any = None  # asyncssh connection
         self._sftp: Any = None  # sftp client, lazy
+        # v0.4 transport cancel: the executor calls
+        # ``transport.cancel()`` between steps. asyncssh's
+        # ``conn.close()`` interrupts in-flight ``conn.run()``
+        # calls with ``ConnectionLost``. The executor
+        # captures the exception and treats it as a cancel
+        # rather than a step failure.
+        self._cancel_requested = False
 
     # ---- connection ----
 
@@ -337,3 +344,35 @@ class SSHTransport(Transport):
             with suppress(Exception):
                 self._conn.close()
             self._conn = None
+
+    async def cancel(self) -> None:
+        """Interrupt any in-flight SSH call.
+
+        asyncssh is one of the transports that CAN
+        interrupt a running call: closing the underlying
+        ``SSHClientConnection`` causes every outstanding
+        ``conn.run()`` to surface ``asyncssh.ConnectionLost``
+        on the next event loop tick. The executor's
+        run-loop treats that as a cancel rather than a
+        step failure (see ``engine.executor.Executor.run``).
+        """
+        self._cancel_requested = True
+        # Closing the connection forces asyncssh to
+        # abort any outstanding ``conn.run()``. Subsequent
+        # calls will lazily reconnect.
+        if self._conn is not None:
+            with suppress(Exception):
+                self._conn.close()
+        # Note: we intentionally do NOT set ``self._conn``
+        # to None here. The next call's ``_connect()``
+        # method sees ``self._conn is not None`` and
+        # uses the cached conn -- which by then is dead
+        # -- and asyncssh will reopen on the fly. To be
+        # safe we drop the reference so the next call
+        # builds a fresh connection.
+        self._conn = None
+        # ``self._sftp`` is session-bound; close it too.
+        if self._sftp is not None:
+            with suppress(Exception):
+                self._sftp.exit()
+            self._sftp = None

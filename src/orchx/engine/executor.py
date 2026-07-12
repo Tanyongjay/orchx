@@ -184,11 +184,23 @@ class Executor:
         report = RunReport(plan=self.plan, started_at=time.time())
         succeeded: list[str] = []
         aborted = False
+        # v0.4 transport cancel: when ``should_cancel`` fires
+        # between steps we also ask the transport to interrupt
+        # its in-flight call. We track whether we made that
+        # call so we only do it once per run. The transport
+        # is allowed to ignore the request; the lock-down
+        # test verifies the cancel actually fired by measuring
+        # elapsed wall-clock time across the cancel.
+        self._cancel_signaled = False
         try:
             for step_id in self.plan.topo_order:
                 # Cancellation check before each step.
                 if self.should_cancel is not None and self.should_cancel():
                     aborted = True
+                    if not self._cancel_signaled:
+                        with suppress(Exception):
+                            await self.transport.cancel()
+                        self._cancel_signaled = True
                     break
                 node = self.plan.nodes[step_id]
                 # Reversal steps are free-standing; they only run during rollback.

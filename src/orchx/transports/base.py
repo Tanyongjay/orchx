@@ -121,3 +121,25 @@ class Transport(Protocol):
     async def file_exists(self, host: str, path: str) -> bool: ...
 
     async def close(self) -> None: ...
+
+    async def cancel(self) -> None:
+        """Request that any in-flight call on this transport
+        stop ASAP.
+
+        The default implementation is a no-op: most callers
+        do not need to interrupt a transport mid-call, and
+        most transports cannot (e.g. a single blocking
+        ``shell.run`` on pywinrm does not expose a stop
+        signal).
+
+        Transports that CAN interrupt their in-flight call
+        SHOULD override this and either:
+          (a) close the underlying channel / connection
+              so the in-flight call returns with an error;
+          (b) signal a stop to the helper thread and let
+              the next ``run_command`` see it.
+
+        The lock-down test in
+        ``tests/test_cancel_signal.py`` proves the cancel
+        pathway actually fires.
+        """
