@@ -167,16 +167,24 @@ set_memory_vault({
 })
 ```
 
-## What v0.4 adds
+## The four backends in v0.4
 
-The v0.4 line adds three more backends, all
-opt-in via `ORCHX_SECRETS_BACKEND`:
+v0.4 adds `vault` to the v0.3 trio, all still selected
+by `ORCHX_SECRETS_BACKEND`. The `vault` backend is
+implemented in orchx.secrets_vault.HashiCorpVault and
+ships with 15 unit tests covering config validation,
+KV-v2 success paths, missing-secret (404), forbidden
+(403), network errors, and the registry integration.
+
+### `env`, `file`, `memory`
+
+Unchanged from v0.3; see the v0.3 description above.
 
 ### `vault` — HashiCorp Vault
 
 The HashiCorp Vault backend reads secrets from a Vault
 KV-v2 path. The descriptor-side `{{ secret.x }}` is
-unchanged.
+unchanged. Stdlib-only — no `hvac`, no `httpx`.
 
 ```bash
 export ORCHX_SECRETS_BACKEND=vault
@@ -186,10 +194,33 @@ export ORCHX_VAULT_MOUNT=secret   # the KV-v2 mount point
 export ORCHX_VAULT_PREFIX=orchx/ # all paths are ${PREFIX}${name}
 ```
 
-Each `{{ secret.x }}` resolves to
-`vault kv get -mount=$MOUNT $PREFIX/x`. Token
-authentication only in v0.4.0; Kubernetes and AWS
-auth methods come in v0.4.1.
+Each `{{ secret.x }}` resolves to:
+
+  GET https://$ORCHX_VAULT_ADDR/v1/$ORCHX_VAULT_MOUNT/data/$ORCHX_VAULT_PREFIX$x
+
+The response shape is the standard KV-v2 envelope:
+
+```json
+{
+  "data": {
+    "data": {"value": "...", ...},
+    "metadata": {...}
+  }
+}
+```
+
+The orchx engine returns `data.data.value` if the
+operator stored a single ``value`` key (the convention
+for the sample descriptors), otherwise it returns the
+entire `data.data` payload serialised as JSON.
+
+Token authentication only in v0.4.0; Kubernetes and AWS
+auth methods come in v0.4.x.
+
+## What v0.5+ adds
+
+The v0.5+ line adds two more backends, all
+opt-in via `ORCHX_SECRETS_BACKEND`:
 
 ### `aws` — AWS Secrets Manager
 

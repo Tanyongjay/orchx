@@ -316,3 +316,36 @@ def test_doctor_exits_nonzero_when_descriptor_load_fails(tmp_path) -> None:
     combined = cp.stdout + cp.stderr
     assert "FAIL" in combined
     assert "descriptor load" in combined
+
+
+# ---------- orchx secrets backend registration ----------
+
+
+def test_secrets_backend_registry_includes_vault() -> None:
+    """The orchx.secrets registry should be able to construct
+    a HashiCorpVault from kwargs. We exercise it in-process
+    (no subprocess) so the test doesn't need a real Vault
+    server.
+    """
+    from orchx.secrets import get_vault
+    from orchx.secrets_vault import HashiCorpVault
+
+    v = get_vault(
+        "vault",
+        addr="https://vault.invalid",
+        token="t",
+        mount="secret",
+    )
+    assert isinstance(v, HashiCorpVault)
+
+
+def test_secrets_backend_registry_rejects_unknown() -> None:
+    """A bad backend name should fail loudly, not silently
+    fall back to the env backend.
+    """
+    import pytest
+
+    from orchx.secrets import get_vault
+
+    with pytest.raises(ValueError, match="unknown secrets backend"):
+        get_vault("does_not_exist")

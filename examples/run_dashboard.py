@@ -13,6 +13,7 @@ The script:
 Stop with Ctrl-C. The SQLite file is left in state/ and will
 be re-used on next start.
 """
+
 from __future__ import annotations
 
 import os
@@ -47,4 +48,4 @@ print(f"  mode: {os.environ.get('ORCHX_AUTH_MODE') or 'none (open)'}")
 print(f"  SQLite: {db.resolve()}")
 print()
 
-uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

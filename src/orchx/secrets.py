@@ -174,6 +174,25 @@ register_vault(
 register_vault("memory", lambda **kwargs: MemoryVault(kwargs.get("secrets")))
 
 
+def _make_hashi_corp_vault(**kwargs: Any) -> Vault:
+    """Lazy import so the base install doesn't depend on the
+    optional http-client machinery used by the vault backend.
+
+    The HashiCorpVault class lives in its own module
+    (orchx.secrets_vault) so an operator can ``pip install
+    orchx`` without any extra deps for env / file / memory
+    backends. The vault backend pulls in stdlib ``ssl``
+    and ``urllib``, which are already available on every
+    supported platform.
+    """
+    from orchx.secrets_vault import HashiCorpVault
+
+    return HashiCorpVault(**kwargs)
+
+
+register_vault("vault", _make_hashi_corp_vault)
+
+
 # ---- template substitution ----
 
 _TOKEN = re.compile(r"\{\%\s*secret\s*['\"]([\w\-.]+)['\"]\s*\%\}")
