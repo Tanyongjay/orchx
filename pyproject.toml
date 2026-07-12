@@ -93,6 +93,11 @@ ignore = []
 "src/orchx/descriptor/models.py" = ["UP007"]
 # app.py embeds HTML/CSS/JS; ruff's E501 fights CSS line-length rules.
 "src/orchx/web/app.py" = ["E501"]
+# dashboard.py embeds the full single-page HTML+JS+CSS
+# string. CSS lines are long by nature (one selector per
+# line) and breaking them would hurt readability of the
+# embedded HTML.
+"src/orchx/web/dashboard.py" = ["E501"]
 
 
 [tool.ruff.lint.flake8-bugbear]  # type: ignore[list-item]
