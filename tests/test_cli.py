@@ -349,3 +349,148 @@ def test_secrets_backend_registry_rejects_unknown() -> None:
 
     with pytest.raises(ValueError, match="unknown secrets backend"):
         get_vault("does_not_exist")
+
+
+# ---------- orchx secrets ----------
+
+
+def test_secrets_list_in_env_mode_with_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no ORCHX_SECRET_* vars exist and the env backend
+    is the active one (the default), ``orchx secrets list``
+    exits 0 and prints 'no secrets in vault'.
+    """
+    for k in ("ORCHX_SECRET_a", "ORCHX_SECRET_b"):
+        monkeypatch.delenv(k, raising=False)
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "secrets",
+            "list",
+            "--backend",
+            "env",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode == 0
+    assert "no secrets in vault" in cp.stdout
+
+
+def test_secrets_list_includes_masked_secrets_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret set via ORCHX_SECRET_FOO in the env should
+    appear in ``orchx secrets list`` with its value masked.
+    We verify both the masked prefix and that the full
+    value is NOT leaked.
+    """
+    monkeypatch.setenv("ORCHX_SECRET_demo_key", "sensitive-password-abcdef")
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "secrets",
+            "list",
+            "--backend",
+            "env",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode == 0
+    # First 4 chars + **** (mask)
+    assert "sens****" in cp.stdout
+    # Full value never leaks (would be a security
+    # regression).
+    assert "sensitive-password-abcdef" not in cp.stdout
+
+
+def test_secrets_get_returns_full_value(monkeypatch) -> None:
+    """``orchx secrets get <name>`` is the one verb that
+    intentionally prints the value. This is the
+    contract operators use to pipe values into scripts.
+    """
+    monkeypatch.setenv("ORCHX_SECRET_single", "value-12345")
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "secrets",
+            "get",
+            "single",
+            "--backend",
+            "env",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode == 0
+    assert cp.stdout.strip() == "value-12345"
+
+
+def test_secrets_get_missing_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "secrets",
+            "get",
+            "does_not_exist",
+            "--backend",
+            "env",
+        ],
+        cwd=REPO_ROOT,
+        env={k: v for k, v in os.environ.items() if not k.startswith("ORCHX_SECRET_")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode != 0
+    assert "SecretNotFoundError" in cp.stderr + cp.stdout
+
+
+def test_secrets_set_masks_value_in_output() -> None:
+    """``orchx secrets set`` is also masked in its
+    confirmation line, even though the operator JUST typed
+    the value. This keeps shell recording tidy.
+    """
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "orchx.cli.app",
+            "secrets",
+            "set",
+            "rotator_key",
+            "PRE-CIOUS-PASSW",
+        ],
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert cp.returncode == 0
+    assert "rotator_key" in cp.stdout
+    # The first 4 chars appear, the rest is masked.
+    assert "PRE-" in cp.stdout
+    # Full value is NOT in the output.
+    assert "PRE-CIOUS-PASSW" not in cp.stdout

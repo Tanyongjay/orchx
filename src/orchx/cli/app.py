@@ -13,6 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -237,6 +238,202 @@ def doctor(
         console.print(f"[red]doctor: {failures} check(s) failed[/red]")
         raise typer.Exit(code=1) from None
     console.print("[green]doctor: all checks passed[/green]")
+
+
+# ---- secrets subcommands ----
+
+# We model 'orchx secrets <verb>' as a Typer sub-app,
+# registered on the main app under the name "secrets".
+# The sub-app has three commands: list / get / set.
+#
+# Why a sub-app and not three top-level commands? Three
+# reasons:
+#   1. The verbs share a small bit of plumbing (vault
+#      selection, masking); a sub-app gives us one
+#      place to maintain it.
+#   2. ``orchx --help`` stays short — the secrets verbs
+#      appear under their own ``Commands:`` block.
+#   3. Future verbs (rotate, audit, import, export) can
+#      join the sub-app without cluttering the parent.
+secrets_app = typer.Typer(
+    add_completion=False,
+    help=(
+        "Manage the active secrets vault from the shell. "
+        "Supports list / get / set on the env, file, and "
+        "memory backends. The vault backend (HashiCorp "
+        "Vault) is read-only from this CLI; rotate via "
+        "the vault itself."
+    ),
+)
+app.add_typer(secrets_app, name="secrets")
+
+
+def _build_vault_for_secrets(
+    backend: str | None,
+    *,
+    file: Path | None,
+) -> Any:
+    """Build the active vault for the secrets CLI.
+
+    Mirrors the ``orchx deploy`` env handling: defaults to
+    ``ORCHX_SECRETS_BACKEND`` (or ``env``), with the
+    explicit ``--file`` path plumbed in for ``file`` mode.
+    """
+    from orchx.secrets import get_vault
+
+    kwargs: dict[str, Any] = {}
+    if backend == "file" and file is not None:
+        kwargs["path"] = file
+    return get_vault(backend, **kwargs)
+
+
+def _mask_value(value: str) -> str:
+    """Mask a secret value for terminal output.
+
+    The literal value never lands on the operator's
+    terminal in a list operation. We follow the same
+    convention as HashiCorp Vault's own CLI: four-
+    character prefix + ellipsis, so the operator can
+    confirm the bucket is roughly the right size
+    without exposing the value.
+    """
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "****"
+    return value[:4] + "****"
+
+
+@secrets_app.command("list")
+def secrets_list(
+    backend: str | None = typer.Option(
+        None,
+        "--backend",
+        "-b",
+        help="env|file|memory (default: $ORCHX_SECRETS_BACKEND or env).",
+    ),
+    file: Path | None = typer.Option(
+        None,
+        "--file",
+        help="Path to the secrets file (when --backend=file).",
+    ),
+    backend_kwarg: bool = typer.Option(
+        False,
+        "--show-backend",
+        help="Print the active backend name alongside each row.",
+    ),
+) -> None:
+    """List every secret the active vault can resolve.
+
+    Values are masked: first 4 chars only, then ``****``.
+    Use ``orchx secrets get <name>`` to print the full
+    value (which is a one-time intentional leak).
+    """
+    from orchx.secrets import MemoryVault
+
+    vault = _build_vault_for_secrets(backend, file=file)
+    if backend_kwarg:
+        console.print(f"[dim]backend: {vault.__class__.__name__}[/dim]")
+
+    # ``memory`` is process-local; the way to populate
+    # it is via ``orchx deploy --set key=value`` or via
+    # ``orchx secrets set`` below. The way to read it
+    # back is the same MemoryVault instance, which is
+    # what this CLI constructs each invocation. For
+    # non-memory backends we go through the protocol's
+    # list_names().
+    is_memory = isinstance(vault, MemoryVault)
+    names = sorted(vault._secrets) if is_memory else vault.list_names()  # noqa: SLF001
+
+    if not names:
+        console.print("[yellow]no secrets in vault[/yellow]")
+        return
+
+    table = Table(box=None)
+    table.add_column("name", style="cyan")
+    table.add_column("value", style="dim")
+    for name in names:
+        try:
+            raw = vault.resolve(name)
+        except Exception as e:
+            # The list shouldn't fail on a per-row
+            # missing value, but ``vault`` can throw
+            # permission / network errors. Surface them
+            # inline rather than aborting the whole list.
+            table.add_row(name, f"[red]{type(e).__name__}: {e}[/red]")
+            continue
+        table.add_row(name, _mask_value(raw))
+    console.print(table)
+
+
+@secrets_app.command("set")
+def secrets_set(
+    name: str = typer.Argument(..., help="Secret name to set."),
+    value: str = typer.Argument(
+        ...,
+        help=(
+            "Secret value. For non-interactive use, prefer "
+            "the environment variable (``ORCHX_SECRET_<NAME>"
+            "=...``) and the ``env`` backend. Pass the "
+            "value as an argument only when you understand "
+            "it will appear in your shell history."
+        ),
+    ),
+) -> None:
+    """Add or overwrite a secret in the process-local memory vault.
+
+    The memory vault is process-local; values do not
+    survive across invocations. For a persistent store,
+    use ``orchx deploy`` (``--secrets-backend=file
+    --secrets-file=...``); this CLI does not modify
+    files in place because file-mode locks and concurrent
+    writes are a different problem, and we want to keep
+    the CLI surface narrow.
+    """
+    from orchx.secrets import MemoryVault
+
+    vault = MemoryVault()
+    vault.set(name, value)
+    console.print(
+        f"[green]set[/green] {name}=[red]{_mask_value(value)}[/red] "
+        f"(in process-local memory vault; not persisted)"
+    )
+
+
+@secrets_app.command("get")
+def secrets_get(
+    name: str = typer.Argument(..., help="Secret name to read."),
+    backend: str | None = typer.Option(
+        None,
+        "--backend",
+        "-b",
+        help="env|file|memory (default: $ORCHX_SECRETS_BACKEND or env).",
+    ),
+    file: Path | None = typer.Option(
+        None,
+        "--file",
+        help="Path to the secrets file (when --backend=file).",
+    ),
+) -> None:
+    """Print the resolved value of a single secret.
+
+    This is the one place where a value lands on the
+    operator's terminal. If the operator wants the
+    secret in a script, the standard idiom is::
+
+      $value="$(orchx secrets get my_name)"
+
+    Anything beyond 'shell history' on a single-tenant
+    laptop is the operator's problem; orchx keeps the
+    surface narrow for that reason.
+    """
+    vault = _build_vault_for_secrets(backend, file=file)
+    try:
+        value = vault.resolve(name)
+    except Exception as e:
+        console.print(f"[red]error[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(code=1) from None
+    console.print(value)
 
 
 @app.command()
