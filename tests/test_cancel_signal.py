@@ -43,14 +43,43 @@ class _CancelServer:
 
     The 'sleep 60' command is the one we use to provoke a
     long-running in-flight call that the test then cancels.
+
+    asyncssh 2.x changed from a simple SSHServer class with
+    ``connection_made`` to a typed factory pattern: the
+    ``server_factory`` callable receives the connection and
+    returns the server object. The minimal hook we need
+    is ``begin_auth`` to allow password-less auth.
     """
 
     def __init__(self) -> None:
-        self.server: asyncssh.SSHServer = type(
-            "S",
-            (asyncssh.SSHServer,),
-            {"connection_made": self.connection_made},
-        )()
+        # asyncssh 2.x factory: factory(conn) -> server.
+        # We return a server object with ``begin_auth`` that
+        # accepts any client. The previous (asyncssh 1.x)
+        # SSHServer-with-connection_made pattern no longer
+        # works in 2.x — the "object has no attribute
+        # connection_made" failure we hit in CI is exactly
+        # that.
+        self._host = "127.0.0.1"
+        self._port = 0
+
+
+        class _Srv(asyncssh.SSHServer):
+            def begin_auth(self, conn: asyncssh.SSHServerConnection) -> bool:  # noqa: D401
+                # Accept any auth; the orchx client doesn't
+                # pass a password (real SSH uses key auth),
+                # so any successful auth response here
+                # satisfies the handshake.
+                conn.set_authorized_keys([])
+                return True
+
+        self.server = _Srv
+        # Bind later in _serve once we have a key
+        self.host_key: asyncssh.SSHKey | None = None
+        self.port = 0
+        self._runner: asyncio.AbstractServer | None = None
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ready = threading.Event()
         self.host_key: asyncssh.SSHKey | None = None
         self.host: str = "127.0.0.1"
         self.port: int = 0
