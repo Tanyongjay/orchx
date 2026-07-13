@@ -241,14 +241,33 @@ export ORCHX_AWS_PREFIX=orchx/   # all names are ${PREFIX}${name}
 
 Each `{{ secret.x }}` resolves to the `SecretString`
 field of the `orchx/x` secret.
-### `k8s` — Kubernetes-native (planned for v0.6)
+### `k8s` — Kubernetes-native
 
 Reads from a Kubernetes Secret in the same namespace
-as the orchx pod. Implementation TBD; uses the
-in-cluster service account, no token needed.
+as the orchx process.
 
-Each `{{ secret.x }}` will resolve to the `data["x"]`
-field of the `orchx-secrets` Secret, base64-decoded.
+```bash
+export ORCHX_SECRETS_BACKEND=k8s
+export ORCHX_K8S_NAMESPACE=orchx
+export ORCHX_K8S_SERVER=https://k8s.internal:6443
+export ORCHX_K8S_TOKEN=hvs.abcdef   # or read from
+                                    # /var/run/secrets/.../token
+export ORCHX_K8S_PREFIX=orchx/    # optional
+```
+
+Each `{{ secret.x }}` resolves to:
+
+  GET <server>/api/v1/namespaces/<ns>/secrets/<prefix><x>
+
+The Kubernetes Secret payload comes back as
+`{"data": {"<key>": "<base64-value>", ...}}`; orchx
+base64-decodes the relevant key. The `stringData`
+fall-through path is also supported as a lenience
+for operators who stored plaintext in `data` by
+accident.
+
+Stdlib-only (urllib + ssl + base64) — no
+`kubernetes` Python client dependency.
 
 ## What's NOT in scope for secrets
 

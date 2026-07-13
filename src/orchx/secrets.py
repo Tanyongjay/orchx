@@ -212,6 +212,23 @@ def _make_aws_secrets_manager(**kwargs: Any) -> Vault:
 register_vault("aws", _make_aws_secrets_manager)
 
 
+def _make_kubernetes_secrets(**kwargs: Any) -> Vault:
+    """Lazy import so the base install doesn't depend on
+    the Kubernetes networking machinery.
+
+    KubernetesSecrets lives in its own module
+    (orchx.secrets_k8s) so an operator can pip install
+    orchx without any extra deps for env / file /
+    memory backends.
+    """
+    from orchx.secrets_k8s import KubernetesSecrets
+
+    return KubernetesSecrets(**kwargs)
+
+
+register_vault("k8s", _make_kubernetes_secrets)
+
+
 # ---- template substitution ----
 
 _TOKEN = re.compile(r"\{\%\s*secret\s*['\"]([\w\-.]+)['\"]\s*\%\}")
