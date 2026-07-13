@@ -62,7 +62,6 @@ class _CancelServer:
         self._host = "127.0.0.1"
         self._port = 0
 
-
         class _Srv(asyncssh.SSHServer):
             def begin_auth(self, conn: asyncssh.SSHServerConnection) -> bool:  # noqa: D401
                 # Accept any auth; the orchx client doesn't
