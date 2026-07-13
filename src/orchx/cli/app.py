@@ -580,17 +580,61 @@ def state_cancel(
         envvar="ORCHX_STATE_DB",
         help="Path to the SQLite file.",
     ),
+    use_socket: bool = typer.Option(
+        True,
+        "--socket/--no-socket",
+        help=(
+            "Try the loopback control socket first (the "
+            "control plane can interrupt the in-flight "
+            "transport call). Falls back to a SQLite-only "
+            "state marker if the socket isn’t there."
+        ),
+    ),
 ) -> None:
     """Cancel a running run by id.
 
-    Marks the run as aborted in the SQLite file. This is
-    best-effort: cross-process cancel via a Unix socket is
-    a v0.6 item; for now this state-marker is the surface
-    that dashboard refreshes.
+    Two-step strategy:
+
+      1. If ``--socket`` (default) and the control plane
+         is reachable on the loopback TCP socket, send a
+         ``cancel`` command. The control plane interrupts
+         the in-flight transport call (v0.4.1 pathway)
+         and emits the same audit event the dashboard does.
+      2. Always update the SQLite state to ``aborted`` so
+         the dashboard's next refresh reflects the
+         cancellation regardless.
+
+    If neither path produces a known outcome, the command
+    exits non-zero. Otherwise it exits 0 and prints a
+    one-line confirmation.
     """
     import asyncio
 
     from orchx.web.store import RunStore
+
+    socket_reply: dict[str, object] | None = None
+    socket_error: str | None = None
+
+    if use_socket:
+        from orchx.web.control_socket import ControlPlaneClient
+
+        client = ControlPlaneClient.from_port_file()
+        if client is not None:
+            try:
+                socket_reply = asyncio.run(client.send_cancel(run_id))
+            except Exception as e:
+                # The CLI must keep working when the socket
+                # is reachable but flaky. Capture the
+                # error and fall through to the SQLite
+                # path; if the SQLite path also fails, the
+                # user gets a complete error message.
+                socket_error = f"{type(e).__name__}: {e}"
+        else:
+            socket_error = (
+                "control socket not reachable (port file missing); using SQLite-marker fallback"
+            )
+    else:
+        socket_error = "control socket disabled (--no-socket)"
 
     actual_db = db or _resolve_default_state_db()
     if not actual_db.exists():
@@ -616,18 +660,25 @@ def state_cancel(
                 state="aborted",
                 finished_at=int(time.time()),
             )
+            msg = "cancel requested via 'orchx state cancel'"
+            if socket_reply and socket_reply.get("ok"):
+                msg += f" (control socket: {socket_reply})"
             await store.emit(
                 run_id,
                 "aborted",
                 step_id="<run>",
-                message="cancel requested via 'orchx state cancel'",
+                message=msg,
             )
         finally:
             with suppress(Exception):
                 await store.close()
 
     asyncio.run(_go())
-    console.print(f"[green]marked {run_id} as aborted[/green]")
+    if socket_reply and socket_reply.get("ok"):
+        console.print(f"[green]cancelled {run_id} via control socket[/green]")
+    else:
+        detail = f" (SQLite-marker; {socket_error})" if socket_error else ""
+        console.print(f"[green]marked {run_id} as aborted[/green][dim]{detail}[/dim]")
 
 
 @state_app.command("purge")

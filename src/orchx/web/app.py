@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,9 +91,94 @@ def _make_app(
             auth_config=auth_config,
         )
         app.state.orchx = state
+
+        # Cross-process cancel via a loopback TCP socket.
+        # The socket runs on the FastAPI event loop and
+        # dispatches cancel commands to the same task graph
+        # the dashboard's POST /api/runs/<id>/cancel hits.
+        # The ``register_cancel_callback`` indirection lets
+        # the socket module stay decoupled from the
+        # control plane's internals.
+        if os.environ.get("ORCHX_CONTROL_DISABLED") != "1":
+            from orchx.web.control_socket import (
+                register_cancel_callback,
+                unregister_cancel_callback,
+            )
+            from orchx.web.control_socket import (
+                serve as _serve_control,
+            )
+
+            async def _cancel_for_socket(
+                st: Any,
+                run_id: str,
+            ) -> dict[str, object]:
+                run = await st.store.get_run(run_id)
+                if run is None:
+                    return {"ok": False, "error": "run not found"}
+                if run.state in ("ok", "failed", "aborted"):
+                    await st.store.emit(
+                        run_id,
+                        status="aborted",
+                        message="cancel ignored: already terminal",
+                    )
+                    return {
+                        "ok": True,
+                        "id": run_id,
+                        "cancelled": False,
+                        "reason": "already terminal",
+                    }
+                ev = st.cancel_events.get(run_id)
+                if ev is not None:
+                    ev.set()
+                task = st.tasks.get(run_id)
+                if task is not None and not task.done():
+                    task.cancel()
+                await st.store.emit(
+                    run_id,
+                    status="aborted",
+                    message="cancellation requested (control socket)",
+                )
+                return {
+                    "ok": True,
+                    "id": run_id,
+                    "cancelled": True,
+                }
+
+            def _cancel_sync(run_id: str) -> dict[str, object]:
+                loop = asyncio.get_event_loop()
+                fut = asyncio.run_coroutine_threadsafe(
+                    _cancel_for_socket(state, run_id),
+                    loop,
+                )
+                return fut.result(timeout=5.0)
+
+            register_cancel_callback(_cancel_sync)
+            control_task = asyncio.create_task(
+                _serve_control(
+                    host=os.environ.get(
+                        "ORCHX_CONTROL_HOST",
+                        "127.0.0.1",
+                    ),
+                    port=int(
+                        os.environ.get("ORCHX_CONTROL_PORT", "0"),
+                    ),
+                ),
+            )
+        else:
+            control_task = None
         try:
             yield
         finally:
+            if control_task is not None:
+                control_task.cancel()
+                with suppress(Exception):
+                    await control_task
+            if os.environ.get("ORCHX_CONTROL_DISABLED") != "1":
+                from orchx.web.control_socket import (
+                    unregister_cancel_callback,
+                )
+
+                unregister_cancel_callback()
             for ev in state.cancel_events.values():
                 ev.set()
             for t in list(state.tasks.values()):
