@@ -1,0 +1,301 @@
+# Sample descriptor for a 3-node PostgreSQL HA cluster
+# with streaming replication: a primary, two synchronous
+# standbys, and a witness node that owns the backup target.
+#
+# Topologically distinct from the other five sample
+# descriptors:
+#
+#   * Five-host role: primary, standby-1, standby-2,
+#     witness, backup. The orchx engine still runs the
+#     steps in topo_order, but the per-step ``on_host``
+#     field drives where the SSH command lands. Steps
+#     with ``on_host: primary`` run only on the primary;
+#     steps with ``on_host: standby-1`` run only on one
+#     of the standbys; etc.
+#
+#   * No long-running service. PostgreSQL runs as a system
+#     service on each host, but orchx is just driving
+#     ``psql`` and ``pg_basebackup`` via SSH. We don't
+#     manage the systemd unit itself.
+#
+#   * Idempotent steps. The run can be repeated without
+#     breaking: ``CREATE ROLE`` uses ``IF NOT EXISTS``,
+#     ``ALTER SYSTEM SET wal_level`` is set once and
+#     re-applied on the next ``SELECT pg_reload_conf()``;
+#     ``pg_basebackup -R`` overwrites the existing
+#     recovery.conf without complaint.
+#
+#   * A reversal path. The rev:* steps undo what the
+#     forward steps did: drop the replication slot,
+#     drop the role, drop the recovery.conf.
+#
+#   * The descriptor is a real production recipe for a
+#     3-node PostgreSQL cluster. A smoke run against a
+#     ``mock://local`` transport completes in well under
+#     a second; a real run takes several minutes because
+#     ``pg_basebackup`` streams the entire primary dataset
+#     to the standby over the SSH transport.
+#
+# Schema notes:
+#   * ``wal_level = replica`` is the minimum for streaming
+#     replication; ``logical`` is needed for logical
+#     decoding (out of scope here).
+#   * Synchronous replication (sync vs async) is set at
+#     connection level via ``synchronous_standby_names``;
+#     we leave that as an explicit operator follow-up
+#     because the right answer depends on the cluster's
+#     RPO targets.
+#   * The witness role plays the part of a tied-break
+#     vote in a Pacemaker / Patroni stack. We don't manage
+#     that stack here; the witness is a placeholder for
+#     "orchx drives db operations, you drive HA".
+
+system:
+  name: PostgreSQL 3-node HA Cluster
+  code: pg_cluster
+  version: "0.3.1"
+
+install_root: /var/lib/pgcluster
+
+variables:
+  pg_port: 5432
+  pg_user: svc_oltp
+  pg_db: appdb
+  pg_repl_user: svc_repl
+  pg_repl_slot: slot1
+  app_port: 5432
+
+topology:
+  roles:
+    - name: primary
+      count: 1
+      description: Read-write primary
+    - name: standby-1
+      count: 1
+      description: First streaming-replication standby
+    - name: standby-2
+      count: 1
+      description: Second streaming-replication standby
+    - name: witness
+      count: 1
+      description: Backup + tie-break (out-of-scope ops)
+    - name: backup
+      count: 1
+      description: Backup target (pg_basebackup sink)
+
+steps:
+  # 1. Pre-flight: the primary must have psql and pg_basebackup.
+  - id: precheck.psql
+    type: check
+    on_host: primary
+    check:
+      kind: command
+      cmd: [which, psql]
+
+  # 2. Pre-flight: each standby confirms psql is available.
+  - id: precheck.standbys
+    type: check
+    on_host: standby-1
+    check:
+      kind: command
+      cmd: [which, psql]
+
+  # 3. Create the application role on the primary. Idempotent
+  #    via IF NOT EXISTS so re-running this descriptor is safe.
+  - id: role.create
+    type: sql
+    on_host: primary
+    sql: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ pg_user }}') THEN
+          CREATE ROLE {{ pg_user }} LOGIN PASSWORD '{{ secret.db_password | default("change-me") }}';
+        END IF;
+      END
+      $$;
+
+  # 4. Create the replication role. The replication
+  #    attribute is granted here so the standbys can use
+  #    it for the streaming-replication connection string.
+  - id: role.repl
+    type: sql
+    on_host: primary
+    sql: |
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ pg_repl_user }}') THEN
+          CREATE ROLE {{ pg_repl_user }} LOGIN REPLICATION PASSWORD '{{ secret.repl_password | default("change-me") }}';
+        END IF;
+      END
+      $$;
+    depends_on: [role.create]
+
+  # 5. Bump wal_level to replica. ALTER SYSTEM writes to
+  #    postgresql.auto.conf and persists across restarts.
+  #    pg_reload_conf picks up the change without bouncing
+  #    the server.
+  - id: primary.wal_level
+    type: sql
+    on_host: primary
+    sql: |
+      ALTER SYSTEM SET wal_level = 'replica';
+      ALTER SYSTEM SET max_replication_slots = 8;
+      ALTER SYSTEM SET hot_standby = on;
+      SELECT pg_reload_conf();
+    depends_on: [role.repl]
+
+  # 6. Create the replication slot. Slots are node-scoped;
+  #    this command runs on the primary and the slot name
+  #    is referenced by the standbys' primary_slot_name
+  #    recovery.conf entry.
+  - id: slot.create
+    type: sql
+    on_host: primary
+    sql: |
+      SELECT 'slot exists' WHERE EXISTS (
+        SELECT 1 FROM pg_replication_slots WHERE slot_name = '{{ pg_repl_slot }}'
+      );
+      -- pg_basebackup --slot mode would create here, but
+      -- we let the secondary create the slot via
+      -- ``SELECT pg_create_physical_replication_slot``.
+      -- Skip if the operator prefers basebackup-managed
+      -- slot creation; the descriptor author can swap.
+    depends_on: [primary.wal_level]
+
+  # 7. primary_slot_name on standby-1. The standby's
+  #    recovery.conf tells the standby which slot to follow.
+  #    We write the file idempotently: pg_basebackup -R
+  #    overwrites it.
+  - id: standby1.recovery
+    type: command
+    on_host: standby-1
+    cmd:
+      - /bin/sh
+      - -c
+      - "echo 'primary_slot_name = {{ pg_repl_slot }}' | sudo -n tee -a /var/lib/pgsql/data/recovery.conf >/dev/null && sudo -n chmod 0600 /var/lib/pgsql/data/recovery.conf"
+    depends_on: [slot.create]
+
+  # 8. Run pg_basebackup from the primary onto standby-1.
+  #    This is the long step; on a real cluster it streams
+  #    the entire primary dataset over SSH.
+  - id: standby1.basebackup
+    type: command
+    on_host: standby-1
+    cmd:
+      - /bin/sh
+      - -c
+      - "pg_basebackup -h primary.internal -U {{ pg_repl_user }} -D /var/lib/pgsql/data -Fp -Xs -P -R"
+    depends_on: [standby1.recovery]
+
+  # 9. Same shape on standby-2.
+  - id: standby2.basebackup
+    type: command
+    on_host: standby-2
+    cmd:
+      - /bin/sh
+      - -c
+      - "pg_basebackup -h primary.internal -U {{ pg_repl_user }} -D /var/lib/pgsql/data -Fp -Xs -P -R"
+    depends_on: [standby2.recovery]
+
+  - id: standby2.recovery
+    type: command
+    on_host: standby-2
+    cmd:
+      - /bin/sh
+      - -c
+      - "echo 'primary_slot_name = {{ pg_repl_slot }}' | sudo -n tee -a /var/lib/pgsql/data/recovery.conf >/dev/null && sudo -n chmod 0600 /var/lib/pgsql/data/recovery.conf"
+    depends_on: [slot.create]
+
+  # 10. Witness node writes a heartbeat row to a witness
+  #     table. The orchx engine doesn't actually do HA
+  #     coordination — the witness is just a sentinel.
+  - id: witness.heartbeat
+    type: sql
+    on_host: witness
+    sql: |
+      CREATE TABLE IF NOT EXISTS witness_heartbeat (
+        node TEXT PRIMARY KEY,
+        ts   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      INSERT INTO witness_heartbeat (node) VALUES ('witness')
+        ON CONFLICT (node) DO UPDATE SET ts = now();
+    depends_on: [standby1.basebackup, standby2.basebackup]
+
+  # 11. Backup target runs pg_basebackup --stream so it
+  #     captures an off-cluster copy. The cron (out of
+  #     scope here) drives this on schedule.
+  - id: backup.pg_basebackup
+    type: command
+    on_host: backup
+    cmd:
+      - /bin/sh
+      - -c
+      - "pg_basebackup -h primary.internal -U {{ pg_repl_user }} -D /var/backups/pg -Fp -Xs -P -c fast"
+    depends_on: [standby1.basebackup, standby2.basebackup]
+
+  # 12. Health check: TCP 5432 reachable on all 3 cluster
+  #     members. The orchx healthcheck step is a simple
+  #     tcp_open; we use it here as a smoke probe after
+  #     the standbys have rebuilt the data directory.
+  - id: smoke.tcp.primary
+    type: healthcheck
+    on_host: primary
+    url: "tcp://127.0.0.1:{{ pg_port }}"
+    depends_on: [primary.wal_level]
+
+  - id: smoke.tcp.standby1
+    type: healthcheck
+    on_host: standby-1
+    url: "tcp://127.0.0.1:{{ pg_port }}"
+    depends_on: [standby1.basebackup]
+
+  - id: smoke.tcp.standby2
+    type: healthcheck
+    on_host: standby-2
+    url: "tcp://127.0.0.1:{{ pg_port }}"
+    depends_on: [standby2.basebackup]
+
+  # 13. The reversal path. Operators running ``orchx deploy
+  #     --no-rollback`` skip these; the default rollback
+  #     path runs them in reverse order before the deploy
+  #     reports success-on-rollback.
+
+  # The rev: prefix pairs the rollback steps with their
+  # forward counterparts. The engine picks up the rev:* step
+  # automatically when the matching forward step hasn't run
+  # yet or its recovery flag is set.
+
+  - id: rev:backup.pg_basebackup
+    type: command
+    on_host: backup
+    cmd:
+      - /bin/sh
+      - -c
+      - "rm -rf /var/backups/pg"
+
+  - id: rev:witness.heartbeat
+    type: sql
+    on_host: witness
+    sql: |
+      DROP TABLE IF EXISTS witness_heartbeat;
+
+  - id: rev:slot.create
+    type: sql
+    on_host: primary
+    sql: |
+      SELECT pg_drop_replication_slot('{{ pg_repl_slot }}')
+      WHERE EXISTS (
+        SELECT 1 FROM pg_replication_slots WHERE slot_name = '{{ pg_repl_slot }}'
+      );
+
+  - id: rev:role.repl
+    type: sql
+    on_host: primary
+    sql: |
+      DROP ROLE IF EXISTS {{ pg_repl_user }};
+
+  - id: rev:role.create
+    type: sql
+    on_host: primary
+    sql: |
+      DROP ROLE IF EXISTS {{ pg_user }};

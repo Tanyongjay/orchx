@@ -363,6 +363,7 @@ async function loadDescriptorOptions() {
     "descriptors/sample_containerized_saas.yaml",
     "descriptors/sample_hr_service.yaml",
     "descriptors/sample_settle_eod.yaml",
+    "descriptors/sample_postgres_cluster.yaml",
   ];
   const sel = $("descriptor");
   sel.innerHTML = "";

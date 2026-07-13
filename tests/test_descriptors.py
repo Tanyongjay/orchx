@@ -16,6 +16,13 @@ The descriptors we exercise:
   * sample_containerized_saas.yaml — Linux / docker compose / 3 roles /
     3 healthcheck probes (app HTTP, app admin, worker metrics) / rolling
     upgrade (new worker up before old one is stopped)
+  * sample_hr_service.yaml — Linux / Python venv + supervisor / secrets
+    surfaced via ``{{ secret.* }}``
+  * sample_settle_eod.yaml — Linux / cron + Python venv / ledger table
+    that captures every successful deploy
+  * sample_postgres_cluster.yaml — Linux / 5-node PG cluster
+    (primary + 2 standbys + witness + backup) / streaming replication
+    with pg_basebackup / rev:* steps tear down the slot & the roles
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ OAUTH = REPO_ROOT / "descriptors" / "sample_oauth_service.yaml"
 SAAS = REPO_ROOT / "descriptors" / "sample_containerized_saas.yaml"
 HR = REPO_ROOT / "descriptors" / "sample_hr_service.yaml"
 SETTLE = REPO_ROOT / "descriptors" / "sample_settle_eod.yaml"
+PG_CLUSTER = REPO_ROOT / "descriptors" / "sample_postgres_cluster.yaml"
 
 
 def _run(transport: MockTransport, descriptor: Path) -> object:
@@ -55,8 +63,8 @@ def _run(transport: MockTransport, descriptor: Path) -> object:
 
 @pytest.mark.parametrize(
     "descriptor",
-    [WEBAPP, OAUTH, SAAS, HR, SETTLE],
-    ids=["webapp-erp", "oauth-svc", "containerized-saas", "hr-svc", "settle-eod"],
+    [WEBAPP, OAUTH, SAAS, HR, SETTLE, PG_CLUSTER],
+    ids=["webapp-erp", "oauth-svc", "containerized-saas", "hr-svc", "settle-eod", "pg-cluster"],
 )
 def test_descriptor_runs_cleanly(descriptor, monkeypatch):
     # The HR and Settle descriptors reference secrets in the

@@ -6,9 +6,8 @@ during the in-process TestClient suite, so the fixture's
 lifespan teardown doesn't race with a TCP listener that
 holds a reference to the loop's task registry.
 """
-from __future__ import annotations
 
-import os
+from __future__ import annotations
 
 import pytest
 
