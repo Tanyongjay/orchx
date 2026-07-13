@@ -1,20 +1,34 @@
-"""Shared pytest fixtures."""
+"""Top-level pytest configuration for orchx tests.
+
+Pytest discovers this file automatically. We use it to
+(a) make sure the cross-process control socket is OFF
+during the in-process TestClient suite, so the fixture's
+lifespan teardown doesn't race with a TCP listener that
+holds a reference to the loop's task registry.
+"""
+from __future__ import annotations
+
+import os
 
 import pytest
 
-from orchx.transports.mock import MockConfig, MockTransport
 
+@pytest.fixture(autouse=True)
+def _disable_control_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disable the loopback control socket during tests.
 
-@pytest.fixture
-def mock_transport():
-    return MockTransport()
+    The socket is opt-in in production
+    (``ORCHX_CONTROL_DISABLED != "1"``); running tests
+    under that default would start a TCP listener whose
+    Task object holds a reference to the test's loop
+    after the fixture's lifespan ends, and that future
+    becomes a `concurrent.futures.CancelledError` on the
+    next test.
 
-
-@pytest.fixture
-def failing_powershell_transport():
-    """A mock that fails every powershell action once before succeeding.
-
-    Lets us assert the executor's retry behaviour.
+    ``tests/test_control_socket.py`` overrides this by
+    starting its own listener with a caller-supplied
+    port (no port-file write, no autouse disable needed).
     """
-    cfg = MockConfig.from_json('{"local":[{"action":"powershell","exit_code":2,"fail_times":1}]}')
-    return MockTransport(config=cfg)
+    monkeypatch.setenv("ORCHX_CONTROL_DISABLED", "1")

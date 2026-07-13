@@ -51,6 +51,13 @@ class AppState:
     store: RunStore
     tasks: dict[str, asyncio.Task[None]]
     cancel_events: dict[str, asyncio.Event]
+    # The asyncio loop this AppState is bound to. We
+    # capture it at ``__init__`` time so the control-socket
+    # cancel callback (which runs in a different task on
+    # the same loop) can ``run_coroutine_threadsafe`` the
+    # cancel without having to ``asyncio.get_event_loop()``
+    # which would return the wrong loop in pytest fixtures.
+    loop: asyncio.AbstractEventLoop
     # The auth config is loaded once at app startup from
     # environment variables. Routes that need to gate on
     # credentials reach for ``state.auth_config`` rather
@@ -89,6 +96,7 @@ def _make_app(
             tasks={},
             cancel_events={},
             auth_config=auth_config,
+            loop=asyncio.get_event_loop(),
         )
         app.state.orchx = state
 

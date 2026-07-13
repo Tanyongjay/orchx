@@ -115,6 +115,17 @@ INDEX_HTML = """
         </select>
       </label>
       <span id="runs-summary" style="margin-left:auto;font-size:12px;color:#8b949e"></span>
+      <span style="margin-left:12px;font-size:12px;color:#8b949e">
+        Refresh:
+        <select id="refresh-interval" onchange="onRefreshIntervalChange()" style="margin-left:4px">
+          <option value="1000">1s</option>
+          <option value="2000" selected>2s</option>
+          <option value="5000">5s</option>
+          <option value="15000">15s</option>
+          <option value="30000">30s</option>
+          <option value="0">off</option>
+        </select>
+      </span>
     </div>
     <ul class="runs-list" id="runs"></ul>
     <div class="row" style="margin-top:8px;align-items:center">
@@ -303,7 +314,35 @@ async function init() {
   });
   await loadDescriptorOptions();
   await refreshRuns();
-  setInterval(refreshRuns, 2000);
+  // Refresh interval is operator-controllable. We
+  // read the persisted value from localStorage; the
+  // default is 2s (matches the v0.4.0 behavior). The
+  // interval is restarted whenever the operator changes
+  // the dropdown, so the dashboard never lags behind
+  // a setting change.
+  let refreshTimer = null;
+  function startRefresh(intervalMs) {
+    if (refreshTimer !== null) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    if (intervalMs > 0) {
+      refreshTimer = setInterval(refreshRuns, intervalMs);
+    }
+  }
+  window.startRefresh = startRefresh;
+  const saved = localStorage.getItem("orchx.refresh_ms");
+  const initialMs = saved !== null ? parseInt(saved, 10) : 2000;
+  // Reflect the persisted value in the dropdown so the
+  // operator sees their previous selection.
+  const sel = $("refresh-interval");
+  if (sel && !isNaN(initialMs)) {
+    const opt = Array.from(sel.options).find(
+      (o) => o.value === String(initialMs),
+    );
+    if (opt) sel.value = String(initialMs);
+  }
+  startRefresh(initialMs);
   // The "Sign out" link is hidden when the server is in
   // mode=none (no credentials to clear) or when the user
   // isn't signed in. It surfaces the moment a credential
@@ -410,6 +449,14 @@ function onFilterChange() {
   currentStateFilter = $("state-filter").value;
   currentPage = 0;
   refreshRuns();
+}
+
+function onRefreshIntervalChange() {
+  const sel = $("refresh-interval");
+  if (!sel) return;
+  const ms = parseInt(sel.value, 10);
+  localStorage.setItem("orchx.refresh_ms", String(ms));
+  window.startRefresh(ms);
 }
 
 function prevPage() {

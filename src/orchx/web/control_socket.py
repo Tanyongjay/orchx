@@ -112,21 +112,37 @@ class ControlPlaneClient:
             }
 
 
-# Mutable slot for the cancel callback registered by the
-# FastAPI lifespan. ``register_cancel_callback``/
-# ``unregister_cancel_callback`` flip it; ``serve`` reads
-# it on every connection.
-_cancel_callback: Any | None = None
+# The cancel dispatch is bound to a specific AppState at
+# lifespan startup time. ``register_cancel_callback``
+# captures both the callback and the state, plus the loop
+# the AppState is bound to. ``serve`` reads these on each
+# connection and the cancel coroutine is scheduled onto
+# that exact loop via ``run_coroutine_threadsafe``.
+#
+# This avoids the failure mode of capturing the loop
+# only at dispatch time: with multiple TestClient
+# fixtures in a pytest run, each lifespan runs on its own
+# loop, and we want the cancel coroutine to fire on the
+# right one.
+_dispatch: tuple[Any, Any, asyncio.AbstractEventLoop] | None = None
 
 
-def register_cancel_callback(fn: Any) -> None:
-    global _cancel_callback
-    _cancel_callback = fn
+def register_cancel_callback(
+    fn: Any,
+    state: Any | None = None,
+    loop: Any | None = None,
+) -> None:
+    import asyncio
+
+    global _dispatch
+    if loop is None:
+        loop = asyncio.get_event_loop()
+    _dispatch = (fn, state, loop)
 
 
 def unregister_cancel_callback() -> None:
-    global _cancel_callback
-    _cancel_callback = None
+    global _dispatch
+    _dispatch = None
 
 
 def _default_cancel_handler(req: dict[str, Any]) -> dict[str, Any]:
@@ -144,13 +160,13 @@ def _default_cancel_handler(req: dict[str, Any]) -> dict[str, Any]:
     run_id = req.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         return {"ok": False, "error": "run_id (str) required"}
-    cancel_fn = _cancel_callback
-    if cancel_fn is None:
+    if _dispatch is None:
         return {
             "ok": False,
             "error": "no cancel callback registered",
         }
-    return cancel_fn(run_id)
+    fn, state, loop = _dispatch
+    return fn(run_id)
 
 
 def _make_protocol(handler: Any) -> type[asyncio.Protocol]:

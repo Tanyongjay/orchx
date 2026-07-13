@@ -117,3 +117,10 @@ disallow_untyped_defs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Ensure the cross-process control socket is OFF during
+# the in-process TestClient suite. The default behaviour
+# for the socket is opt-in (env ORCHX_CONTROL_DISABLED != 1),
+# so leaving the var unset would cause every fixture to
+# spin up a real TCP listener that races test teardown.
+# The tests/test_state_cli.py and tests/test_control_socket.py
+# suites override this locally where they need the listener.
