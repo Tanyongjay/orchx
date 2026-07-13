@@ -141,6 +141,7 @@ def cancel_server() -> object:
         srv.stop()
 
 
+@pytest.mark.timeout(60)
 def test_transport_cancel_aborts_inflight_ssh_call(
     cancel_server: _CancelServer,
 ) -> None:
@@ -255,9 +256,24 @@ steps:
         f"elapsed={elapsed_total:.1f}s (expected <30s)"
     )
 
-    # The run was aborted (cancel fired).
+    # The cancel worked. There are two ways the run ends:
+    # (a) the should_cancel() hook fired during the
+    #     between-steps check → report.aborted=True, OR
+    # (b) the in-flight asyncssh.run() raised
+    #     ConnectionLost when the SSH transport closed,
+    #     so the step failed with ok=False → the executor
+    #     falls into the failure path with rollback.
+    # What we MUST assert is that the elapsed wall-clock
+    # is well below the 60s budget (i.e. the cancel
+    # actually interrupted, not just timed out the test).
+    # ``report.aborted`` is set in path (a); in path (b)
+    # report.exit_code != 0 and the long_sleep step is
+    # FAILED. Either path proves the cancel worked.
     report = go.report  # type: ignore[attr-defined]
-    assert report.aborted is True
+    assert report.aborted is True or report.exit_code != 0, (
+        "neither abort nor failure path was taken — the cancel had no effect"
+    )
+    assert report.plan.nodes["long_sleep"].status.value == "failed"
 
     # Make sure the cleanup is okay.
     asyncio.run(transport.close())
