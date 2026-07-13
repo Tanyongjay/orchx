@@ -217,10 +217,15 @@ entire `data.data` payload serialised as JSON.
 Token authentication only in v0.4.0; Kubernetes and AWS
 auth methods come in v0.4.x.
 
-## What v0.5+ adds
+## The five backends in v0.5
 
-The v0.5+ line adds two more backends, all
-opt-in via `ORCHX_SECRETS_BACKEND`:
+v0.5 adds `aws` to the v0.4 quartet. Like
+HashiCorpVault, it's read-only at the orchx level;
+the operator rotates via the AWS IAM console, not
+through orchx.
+
+The four already shipped (`env`, `file`, `memory`,
+`vault`) are unchanged; this section documents `aws`.
 
 ### `aws` — AWS Secrets Manager
 
@@ -236,19 +241,13 @@ export ORCHX_AWS_PREFIX=orchx/   # all names are ${PREFIX}${name}
 
 Each `{{ secret.x }}` resolves to the `SecretString`
 field of the `orchx/x` secret.
-
-### `k8s` — Kubernetes-native
+### `k8s` — Kubernetes-native (planned for v0.6)
 
 Reads from a Kubernetes Secret in the same namespace
-as the orchx pod.
+as the orchx pod. Implementation TBD; uses the
+in-cluster service account, no token needed.
 
-```bash
-export ORCHX_SECRETS_BACKEND=k8s
-export ORCHX_K8S_NAMESPACE=orchx
-# Uses the in-cluster service account; no token needed.
-```
-
-Each `{{ secret.x }}` resolves to the `data["x"]`
+Each `{{ secret.x }}` will resolve to the `data["x"]`
 field of the `orchx-secrets` Secret, base64-decoded.
 
 ## What's NOT in scope for secrets

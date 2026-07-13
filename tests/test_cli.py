@@ -467,6 +467,22 @@ def test_secrets_get_missing_exits_nonzero(
     assert "SecretNotFoundError" in cp.stderr + cp.stdout
 
 
+def test_secrets_backend_registry_includes_aws() -> None:
+    """The orchx.secrets registry should be able to construct
+    an AwsSecretsManager from kwargs.
+    """
+    from orchx.secrets import get_vault
+    from orchx.secrets_aws import AwsSecretsManager
+
+    v = get_vault(
+        "aws",
+        region="us-east-1",
+        access_key_id="AKIATESTONLY",
+        secret_access_key="test-secret",
+    )
+    assert isinstance(v, AwsSecretsManager)
+
+
 def test_secrets_set_masks_value_in_output() -> None:
     """``orchx secrets set`` is also masked in its
     confirmation line, even though the operator JUST typed

@@ -193,6 +193,25 @@ def _make_hashi_corp_vault(**kwargs: Any) -> Vault:
 register_vault("vault", _make_hashi_corp_vault)
 
 
+def _make_aws_secrets_manager(**kwargs: Any) -> Vault:
+    """Lazy import so the base install doesn't depend on
+    the AWS / HashiCorp networking machinery when the
+    operator only uses env / file / memory backends.
+
+    AwsSecretsManager lives in its own module
+    (orchx.secrets_aws) so an operator can ``pip install
+    orchx`` without any extra deps for the local
+    backends. The aws backend pulls in stdlib ``hmac``
+    and ``hashlib``, which are always available.
+    """
+    from orchx.secrets_aws import AwsSecretsManager
+
+    return AwsSecretsManager(**kwargs)
+
+
+register_vault("aws", _make_aws_secrets_manager)
+
+
 # ---- template substitution ----
 
 _TOKEN = re.compile(r"\{\%\s*secret\s*['\"]([\w\-.]+)['\"]\s*\%\}")
