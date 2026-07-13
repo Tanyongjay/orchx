@@ -327,6 +327,17 @@ class RunStore:
         if queue is not None:
             await queue.put(None)
 
+    async def delete_run(self, run_id: str) -> None:
+        # Used by 'orchx state purge'. Events cascade
+        # on the FK in _SCHEMA.
+        assert self._conn is not None
+        async with self._write_lock:
+            await self._conn.execute(
+                "DELETE FROM runs WHERE id = ?",
+                (run_id,),
+            )
+            await self._conn.commit()
+
     async def list_events(self, run_id: str) -> list[dict[str, Any]]:
         assert self._conn is not None
         cur = await self._conn.execute(

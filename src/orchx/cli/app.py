@@ -8,10 +8,11 @@ Commands:
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import sys
+import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -147,7 +148,7 @@ def doctor(
         seen: set[str] = set()
         ctx = dict(_ctx_from_descriptor(parsed))
         ctx["_secret_probe"] = seen
-        with contextlib.suppress(Exception):
+        with suppress(Exception):
             # If render fails, the doctor still continues
             # to the next check; the user gets the real
             # failure when they actually deploy.
@@ -266,6 +267,21 @@ secrets_app = typer.Typer(
     ),
 )
 app.add_typer(secrets_app, name="secrets")
+
+
+state_app = typer.Typer(
+    add_completion=False,
+    help=(
+        "Inspect and manage the orchx state database "
+        "(the SQLite file that records every deploy). "
+        "Supports list / get / cancel / purge."
+    ),
+)
+app.add_typer(state_app, name="state")
+
+
+def _resolve_default_state_db() -> Path:
+    return Path("state") / "local.sqlite"
 
 
 def _build_vault_for_secrets(
@@ -434,6 +450,242 @@ def secrets_get(
         console.print(f"[red]error[/red] {type(e).__name__}: {e}")
         raise typer.Exit(code=1) from None
     console.print(value)
+
+
+@state_app.command("list")
+def state_list(
+    db: Path = typer.Option(
+        None,
+        "--db",
+        envvar="ORCHX_STATE_DB",
+        help="Path to the SQLite file (default: state/local.sqlite).",
+    ),
+    state_filter: str | None = typer.Option(
+        None,
+        "--state",
+        "-s",
+        help="Show only runs in this state.",
+    ),
+    limit: int = typer.Option(50, "--limit", "-n"),
+    offset: int = typer.Option(0, "--offset"),
+) -> None:
+    """List runs in the orchx state database."""
+    import asyncio
+
+    from orchx.web.store import RunStore
+
+    actual_db = db or _resolve_default_state_db()
+    if not actual_db.exists():
+        console.print(f"[yellow]no state db at {actual_db}[/yellow]")
+        raise typer.Exit(code=0)
+
+    async def _go() -> None:
+        store = RunStore(actual_db)
+        await store.init()
+        try:
+            rows, total = await store.list_runs(limit=limit, offset=offset, state=state_filter)
+        finally:
+            with suppress(Exception):
+                await store.close()
+        if not rows:
+            console.print(f"[yellow]0 runs (total {total})[/yellow]")
+            return
+        table = Table(box=None)
+        table.add_column("id", style="cyan")
+        table.add_column("state", style="bold")
+        table.add_column("started_at", style="dim")
+        table.add_column("descriptor")
+        for r in rows:
+            table.add_row(
+                r.id[:12],
+                r.state,
+                str(int(r.created_at)) if r.created_at else "",
+                r.descriptor,
+            )
+        console.print(table)
+        console.print(
+            f"[dim]showing {len(rows)} of {total}; --offset and --limit for pagination[/dim]"
+        )
+
+    asyncio.run(_go())
+
+
+@state_app.command("get")
+def state_get(
+    run_id: str = typer.Argument(..., help="Run id to inspect."),
+    db: Path = typer.Option(
+        None,
+        "--db",
+        envvar="ORCHX_STATE_DB",
+        help="Path to the SQLite file.",
+    ),
+    events: bool = typer.Option(
+        False,
+        "--events",
+        help="Print every event for this run.",
+    ),
+) -> None:
+    """Print the full record for a single run."""
+    import asyncio
+
+    from orchx.web.store import RunStore
+
+    actual_db = db or _resolve_default_state_db()
+    if not actual_db.exists():
+        console.print(f"[red]no state db at {actual_db}[/red]")
+        raise typer.Exit(code=1) from None
+
+    async def _go() -> None:
+        store = RunStore(actual_db)
+        await store.init()
+        try:
+            rows, _ = await store.list_runs(limit=500)
+            row = next((r for r in rows if r.id == run_id), None)
+            if row is None:
+                console.print(f"[red]run {run_id} not found[/red]")
+                raise typer.Exit(code=1) from None
+            from dataclasses import asdict
+
+            t = Table(box=None)
+            t.add_column("field", style="cyan")
+            t.add_column("value")
+            for k, v in asdict(row).items():
+                if k == "plan_json":
+                    continue
+                t.add_row(k, str(v))
+            console.print(t)
+            if events:
+                evs = await store.list_events(run_id)
+                console.print("[dim]events:[/dim]")
+                for ev in evs:
+                    console.print(
+                        f"  {ev.get('status', '-'):8s} "
+                        f"step={ev.get('step_id') or '-':20s} "
+                        f"host={ev.get('host') or '-':10s} "
+                        f"msg={(ev.get('message') or '')[:60]}"
+                    )
+        finally:
+            with suppress(Exception):
+                await store.close()
+
+    asyncio.run(_go())
+
+
+@state_app.command("cancel")
+def state_cancel(
+    run_id: str = typer.Argument(..., help="Run id to cancel."),
+    db: Path = typer.Option(
+        None,
+        "--db",
+        envvar="ORCHX_STATE_DB",
+        help="Path to the SQLite file.",
+    ),
+) -> None:
+    """Cancel a running run by id.
+
+    Marks the run as aborted in the SQLite file. This is
+    best-effort: cross-process cancel via a Unix socket is
+    a v0.6 item; for now this state-marker is the surface
+    that dashboard refreshes.
+    """
+    import asyncio
+
+    from orchx.web.store import RunStore
+
+    actual_db = db or _resolve_default_state_db()
+    if not actual_db.exists():
+        console.print(f"[red]no state db at {actual_db}[/red]")
+        raise typer.Exit(code=1) from None
+
+    async def _go() -> None:
+        store = RunStore(actual_db)
+        await store.init()
+        try:
+            rows, _ = await store.list_runs(limit=500)
+            row = next((r for r in rows if r.id == run_id), None)
+            if row is None:
+                console.print(f"[red]run {run_id} not found[/red]")
+                raise typer.Exit(code=1) from None
+            if row.state in ("ok", "failed", "aborted"):
+                console.print(
+                    f"[yellow]run {run_id} already in terminal state {row.state!r}; no-op[/yellow]"
+                )
+                return
+            await store.update_run(
+                run_id,
+                state="aborted",
+                finished_at=int(time.time()),
+            )
+            await store.emit(
+                run_id,
+                "aborted",
+                step_id="<run>",
+                message="cancel requested via 'orchx state cancel'",
+            )
+        finally:
+            with suppress(Exception):
+                await store.close()
+
+    asyncio.run(_go())
+    console.print(f"[green]marked {run_id} as aborted[/green]")
+
+
+@state_app.command("purge")
+def state_purge(
+    older_than_days: int = typer.Option(
+        30,
+        "--older-than-days",
+        help="Remove runs whose created_at is older than this many days.",
+    ),
+    db: Path = typer.Option(
+        None,
+        "--db",
+        envvar="ORCHX_STATE_DB",
+        help="Path to the SQLite file.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt.",
+    ),
+) -> None:
+    """Delete runs older than ``--older-than-days``."""
+    import asyncio
+
+    from orchx.web.store import RunStore
+
+    actual_db = db or _resolve_default_state_db()
+    if not actual_db.exists():
+        console.print(f"[yellow]no state db at {actual_db}[/yellow]")
+        raise typer.Exit(code=0)
+
+    if not yes:
+        confirmed = typer.confirm(
+            f"purge runs older than {older_than_days} days from {actual_db}?",
+            default=False,
+        )
+        if not confirmed:
+            raise typer.Abort()
+
+    cutoff = int(time.time()) - older_than_days * 86_400
+    purged: list[str] = []
+
+    async def _go() -> None:
+        store = RunStore(actual_db)
+        await store.init()
+        try:
+            rows, _ = await store.list_runs(limit=500)
+            for r in rows:
+                if r.created_at is not None and int(r.created_at) < cutoff:
+                    await store.delete_run(r.id)
+                    purged.append(r.id)
+        finally:
+            with suppress(Exception):
+                await store.close()
+
+    asyncio.run(_go())
+    console.print(f"[green]purged {len(purged)} runs older than {older_than_days} days[/green]")
 
 
 @app.command()
