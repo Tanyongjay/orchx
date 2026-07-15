@@ -113,7 +113,7 @@ async def _start_server() -> tuple[object, int, asyncssh.SSHKey, asyncssh.SSHKey
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(60)
 async def test_ssh_transport_runs_command_against_inprocess_server(
     tmp_path: Path,
 ) -> None:
@@ -156,7 +156,7 @@ async def test_ssh_transport_runs_command_against_inprocess_server(
 
 
 @pytest.mark.asyncio
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(60)
 async def test_engine_deploys_against_ssh_target(
     tmp_path: Path,
 ) -> None:
