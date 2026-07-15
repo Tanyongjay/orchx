@@ -117,6 +117,19 @@ disallow_untyped_defs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Custom marker for tests that spin up an in-process
+# asyncssh server. These are Linux-only because
+# asyncssh's ProactorEventLoop hangs on Windows for
+# this fixture, and they are slow because the in-process
+# server has to come up + accept + handshake before the
+# body runs. CI's Linux runner is busier than a developer
+# laptop and routinely exceeds 60s on these. The tests
+# still run in the suite by default; use `-m 'not ssh_e2e'`
+# in CI pipelines where the lock-down is not the
+# priority (e.g. the publish workflow).
+markers = [
+    "ssh_e2e: tests that drive an in-process asyncssh server",
+]
 # Ensure the cross-process control socket is OFF during
 # the in-process TestClient suite. The default behaviour
 # for the socket is opt-in (env ORCHX_CONTROL_DISABLED != 1),

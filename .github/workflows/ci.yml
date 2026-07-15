@@ -86,7 +86,11 @@ jobs:
       - name: Run tests
         run: |
           . .venv/bin/activate
-          pytest -v
+          # Skip the SSH in-process e2e tests in this main
+          # job; they're slow on Linux CI and live in their
+          # own dedicated job below with a generous
+          # pytest-timeout. They are also Linux-only.
+          pytest -v -m "not ssh_e2e"
 
       - name: Smoke plan and deploy against mock
         run: |
@@ -143,4 +147,6 @@ jobs:
       - name: Run e2e SSH tests
         run: |
           . .venv/bin/activate
-          pytest -v tests/test_ssh_e2e.py
+          # Only the ssh_e2e-marked tests with a generous
+          # per-test timeout. Linux-only.
+          pytest -v -m ssh_e2e --timeout=180

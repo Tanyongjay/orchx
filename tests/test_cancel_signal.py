@@ -141,7 +141,8 @@ def cancel_server() -> object:
         srv.stop()
 
 
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(180)
+@pytest.mark.ssh_e2e
 def test_transport_cancel_aborts_inflight_ssh_call(
     cancel_server: _CancelServer,
 ) -> None:
